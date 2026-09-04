@@ -3,6 +3,11 @@
 This project implements an FP8 E4M3 ABFT GEMM optimization chain for NVIDIA
 Hopper/SM90, with FP32 accumulation and output.
 
+## Visualization Dashboard
+
+Open [`web/index.html`](web/index.html) directly in a browser to explore the
+S0-S7 throughput progression, cuBLASLt comparison, and S7 execution pipeline.
+
 ## Curated Optimization Chain
 
 Each stage is a standalone source file under `src/`:
@@ -33,8 +38,35 @@ Run the final stage on physical GPU 1:
 CUDA_VISIBLE_DEVICES=1 \
   ./build/stage7_cluster_multicast_abft_fp8_gemm \
   --m 4096 --n 4096 --k 4096 \
-  --warmup 20 --repeat 50 --rel-tol 0.002
+  --warmup 20 --repeat 50 --rel-tol 0.00002
 ```
+
+Run an S7 random single-fault campaign:
+
+```bash
+make s7_fault_campaign \
+  FAULT_TRIALS=1000 \
+  FAULT_MIN_VALUE=1 \
+  FAULT_MAX_VALUE=256 \
+  FAULT_SEED=12345
+```
+
+The standalone campaign program is `src/s7_random_fault_campaign.cu`; it does
+not change the benchmark behavior of `src/s7_cluster_multicast_abft_fp8_gemm.cu`.
+Each trial selects a random `64x64` ABFT subtile, row, column, fault magnitude,
+and sign. Magnitudes are sampled uniformly from
+`[FAULT_MIN_VALUE, FAULT_MAX_VALUE]`.
+The report includes detection rate, correction-attempt rate, verified
+correction rate, missed faults, detected-but-uncorrected faults,
+miscorrections, maximum post-correction residual, and per-magnitude-bin rates.
+
+The current non-segmented S7 threshold is `abs_tol=0.01` and
+`rel_tol=2e-5`. At `4096^3`, `rel_tol=2e-5` produces no false-positive tiles
+for the deterministic benchmark input, while `rel_tol=1e-5` produces 710.
+With 1,000 uniformly distributed random faults in `[1,256]`, the selected
+threshold detects 100% and verifies correction for 98.1%. Exact-magnitude
+`+/-1` faults remain below the reliable sensitivity range: detection is 11.1%
+and verified correction is 0.5%.
 
 Detailed optimization experiments are recorded in
 `doc/NATIVE_OPTIMIZATION_PLAN.md`.
@@ -52,8 +84,9 @@ ABFT relative tolerance: 0.002
 Execution: serial
 ```
 
-S2 uses its separately calibrated legacy threshold `rel_tol=0.05`; all other
-stages use `rel_tol=0.002`.
+S2 uses its separately calibrated legacy threshold `rel_tol=0.05`. The table
+records the original S3-S7 measurements at `rel_tol=0.002`; the current S7
+default is `rel_tol=2e-5`, which does not change the kernel instruction path.
 
 | Stage | ABFT mode | Kernel/GEMM | Metadata | First call | 10-use amortized | Steady TFLOPS | Amortized TFLOPS |
 |---|---|---:|---:|---:|---:|---:|---:|

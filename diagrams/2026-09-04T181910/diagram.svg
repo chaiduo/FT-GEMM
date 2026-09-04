@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900">
+  <defs>
+    <linearGradient id="header" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#102A43"/>
+      <stop offset="1" stop-color="#1F5A78"/>
+    </linearGradient>
+    <linearGradient id="rise" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#2F80ED"/>
+      <stop offset="0.55" stop-color="#00A878"/>
+      <stop offset="1" stop-color="#F2994A"/>
+    </linearGradient>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#102A43" flood-opacity="0.16"/>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="900" rx="24" fill="#F7F9FC"/>
+  <path d="M0 24 Q0 0 24 0 H1576 Q1600 0 1600 24 V150 H0 Z" fill="url(#header)"/>
+  <text x="72" y="66" font-family="Noto Sans SC" font-size="34" font-weight="700" fill="#FFFFFF">Hopper FP8 ABFT GEMM：从正确性基线到 95.3% cuBLASLt</text>
+  <text x="72" y="112" font-family="Noto Sans SC" font-size="20" fill="#CDE7F5">S0–S7 全程保留 Tile-local 检测与单点纠错，性能提升 1740.9×</text>
+
+  <text x="70" y="198" font-family="Noto Sans SC" font-size="24" font-weight="700" fill="#102A43">性能阶梯（4096³，H20 物理 GPU 1）</text>
+  <line x1="92" y1="445" x2="1510" y2="445" stroke="#CAD5E0" stroke-width="2"/>
+  <polyline points="120,425 315,414 510,385 705,335 900,306 1095,242 1290,192 1485,168"
+            fill="none" stroke="url(#rise)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g font-family="Noto Sans SC">
+    <g>
+      <circle cx="120" cy="425" r="18" fill="#2F80ED" stroke="#FFFFFF" stroke-width="5"/>
+      <text x="120" y="472" text-anchor="middle" font-size="18" font-weight="700" fill="#102A43">S0</text>
+      <text x="120" y="500" text-anchor="middle" font-size="17" fill="#486581">0.1485</text>
+      <text x="120" y="526" text-anchor="middle" font-size="15" fill="#627D98">Native Tile</text>
+    </g>
+    <g>
+      <circle cx="315" cy="414" r="18" fill="#397BD1" stroke="#FFFFFF" stroke-width="5"/>
+      <text x="315" y="472" text-anchor="middle" font-size="18" font-weight="700" fill="#102A43">S1</text>
+      <text x="315" y="500" text-anchor="middle" font-size="17" fill="#486581">0.2527</text>
+      <text x="315" y="526" text-anchor="middle" font-size="15" fill="#627D98">Multi-stream</text>
+    </g>
+    <g>
+      <circle cx="510" cy="385" r="18" fill="#3187B7" stroke="#FFFFFF" stroke-width="5"/>
+      <text x="510" y="432" text-anchor="middle" font-size="18" font-weight="700" fill="#102A43">S2</text>
+      <text x="510" y="460" text-anchor="middle" font-size="17" fill="#486581">3.90</text>
+      <text x="510" y="486" text-anchor="middle" font-size="15" fill="#627D98">WGMMA</text>
+    </g>
+    <g>
+      <circle cx="705" cy="335" r="18" fill="#20968E" stroke="#FFFFFF" stroke-width="5"/>
+      <text x="705" y="382" text-anchor="middle" font-size="18" font-weight="700" fill="#102A43">S3</text>
+      <text x="705" y="410" text-anchor="middle" font-size="17" fill="#486581">33.21</text>
+      <text x="705" y="436" text-anchor="middle" font-size="15" fill="#627D98">TMA + Online</text>
+    </g>
+    <g>
+      <circle cx="900" cy="306" r="18" fill="#00A878" stroke="#FFFFFF" stroke-width="5"/>
+      <text x="900" y="353" text-anchor="middle" font-size="18" font-weight="700" fill="#102A43">S4</text>
+      <text x="900" y="381" text-anchor="middle" font-size="17" fill="#486581">39.79</text>
+      <text x="900" y="407" text-anchor="middle" font-size="15" fill="#627D98">Input Cache</text>
+    </g>
+    <g>
+      <circle cx="1095" cy="242" r="18" fill="#43A854" stroke="#FFFFFF" stroke-width="5"/>
+      <text x="1095" y="289" text-anchor="middle" font-size="18" font-weight="700" fill="#102A43">S5</text>
+      <text x="1095" y="317" text-anchor="middle" font-size="17" fill="#486581">132.85</text>
+      <text x="1095" y="343" text-anchor="middle" font-size="15" fill="#627D98">Expected Cache</text>
+    </g>
+    <g>
+      <circle cx="1290" cy="192" r="18" fill="#D9A227" stroke="#FFFFFF" stroke-width="5"/>
+      <text x="1290" y="239" text-anchor="middle" font-size="18" font-weight="700" fill="#102A43">S6</text>
+      <text x="1290" y="267" text-anchor="middle" font-size="17" fill="#486581">234.08</text>
+      <text x="1290" y="293" text-anchor="middle" font-size="15" fill="#627D98">Warp-specialized</text>
+    </g>
+    <g>
+      <circle cx="1485" cy="168" r="24" fill="#F2994A" stroke="#FFFFFF" stroke-width="6" filter="url(#shadow)"/>
+      <text x="1485" y="222" text-anchor="middle" font-size="18" font-weight="700" fill="#102A43">S7</text>
+      <text x="1485" y="250" text-anchor="middle" font-size="17" font-weight="700" fill="#C45D13">258.52</text>
+      <text x="1485" y="276" text-anchor="middle" font-size="15" fill="#627D98">K128 + Multicast</text>
+    </g>
+  </g>
+
+  <g font-family="Noto Sans SC">
+    <path d="M65 575 H1535" stroke="#D9E2EC" stroke-width="2"/>
+    <text x="70" y="615" font-size="24" font-weight="700" fill="#102A43">S7 最终流水：搬运、计算与校验解耦</text>
+
+    <path d="M100 690 C100 640 145 625 190 625 C235 625 280 640 280 690 C280 740 235 755 190 755 C145 755 100 740 100 690 Z"
+          fill="#E8F1FF" stroke="#2F80ED" stroke-width="3"/>
+    <text x="190" y="674" text-anchor="middle" font-size="19" font-weight="700" fill="#174EA6">Global A / B</text>
+    <text x="190" y="704" text-anchor="middle" font-size="16" fill="#486581">FP8 E4M3</text>
+
+    <polyline points="280,690 340,690 340,655 395,655" fill="none" stroke="#2F80ED" stroke-width="4"/>
+    <polygon points="395,655 381,647 381,663" fill="#2F80ED"/>
+    <text x="338" y="677" text-anchor="middle" font-size="14" fill="#2F80ED">TMA</text>
+
+    <rect x="405" y="615" width="225" height="150" rx="22" fill="#E6FAF4" stroke="#00A878" stroke-width="3" filter="url(#shadow)"/>
+    <text x="517" y="651" text-anchor="middle" font-size="20" font-weight="700" fill="#087F5B">Producer Warp</text>
+    <text x="517" y="684" text-anchor="middle" font-size="16" fill="#486581">3-stage Shared Pipeline</text>
+    <text x="517" y="714" text-anchor="middle" font-size="16" fill="#486581">每 Stage K=128</text>
+    <text x="517" y="744" text-anchor="middle" font-size="15" fill="#087F5B">A: 2×1 Cluster Multicast</text>
+
+    <polyline points="630,690 685,690 685,650 735,650" fill="none" stroke="#00A878" stroke-width="4"/>
+    <polygon points="735,650 721,642 721,658" fill="#00A878"/>
+
+    <path d="M745 603 H1005 L1035 690 L1005 777 H745 L715 690 Z"
+          fill="#FFF4D8" stroke="#D9A227" stroke-width="3" filter="url(#shadow)"/>
+    <text x="875" y="641" text-anchor="middle" font-size="20" font-weight="700" fill="#9C6F00">2 WGMMA Consumer Groups</text>
+    <text x="875" y="677" text-anchor="middle" font-size="17" fill="#486581">m64n128k32 × 4 / Stage</text>
+    <text x="875" y="711" text-anchor="middle" font-size="17" fill="#486581">FP32 Accumulation</text>
+    <text x="875" y="745" text-anchor="middle" font-size="15" fill="#9C6F00">更高 Issue Density + B Tile 复用</text>
+
+    <polyline points="1035,690 1090,690 1090,650 1140,650" fill="none" stroke="#D9A227" stroke-width="4"/>
+    <polygon points="1140,650 1126,642 1126,658" fill="#D9A227"/>
+
+    <rect x="1150" y="615" width="230" height="150" rx="22" fill="#FDECEC" stroke="#D64545" stroke-width="3" filter="url(#shadow)"/>
+    <text x="1265" y="651" text-anchor="middle" font-size="20" font-weight="700" fill="#B42318">4 Verifier Warps</text>
+    <text x="1265" y="684" text-anchor="middle" font-size="16" fill="#486581">4 × 64×64 ABFT Subtiles</text>
+    <text x="1265" y="714" text-anchor="middle" font-size="16" fill="#486581">Actual vs Expected</text>
+    <text x="1265" y="744" text-anchor="middle" font-size="15" fill="#B42318">检测 · 定位 · 单点纠正</text>
+
+    <polyline points="1380,690 1425,690" fill="none" stroke="#D64545" stroke-width="4"/>
+    <polygon points="1425,690 1411,682 1411,698" fill="#D64545"/>
+    <circle cx="1490" cy="690" r="57" fill="#EAF7EE" stroke="#3FA55B" stroke-width="4"/>
+    <path d="M1463 690 L1482 709 L1519 668" fill="none" stroke="#2B8A3E" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1490" y="775" text-anchor="middle" font-size="16" font-weight="700" fill="#2B8A3E">Corrected C</text>
+  </g>
+
+  <text x="70" y="850" font-family="Noto Sans SC" font-size="17" fill="#486581">关键转折：S3 在线融合解决全局回读；S5 移出 Expected 标量工作；S6/S7 提升 WGMMA 密度与跨 CTA 数据复用。</text>
+  <text x="1530" y="850" text-anchor="end" font-family="Noto Sans SC" font-size="17" font-weight="700" fill="#F2994A">cuBLASLt: 271.3 TFLOPS</text>
+</svg>

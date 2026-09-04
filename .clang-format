@@ -1,0 +1,14 @@
+BasedOnStyle: Google
+Language: Cpp
+ColumnLimit: 140
+IndentWidth: 2
+ContinuationIndentWidth: 4
+BinPackArguments: true
+BinPackParameters: true
+AllowAllArgumentsOnNextLine: true
+AllowAllParametersOfDeclarationOnNextLine: true
+BreakStringLiterals: false
+ReflowComments: false
+SortIncludes: Never
+PointerAlignment: Left
+DerivePointerAlignment: false

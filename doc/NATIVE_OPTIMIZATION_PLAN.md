@@ -32,7 +32,7 @@ Run a stage on physical GPU 1:
 CUDA_VISIBLE_DEVICES=1 \
   ./build/stage7_cluster_multicast_abft_fp8_gemm \
   --m 4096 --n 4096 --k 4096 \
-  --warmup 20 --repeat 50 --rel-tol 0.002
+  --warmup 20 --repeat 50 --rel-tol 0.00002
 ```
 
 ## Common Contract
@@ -209,8 +209,9 @@ Repeat: 10
 Execution: serial
 ```
 
-S2 uses its legacy calibrated threshold `rel_tol=0.05`; other stages use
-`rel_tol=0.002`.
+S2 uses its legacy calibrated threshold `rel_tol=0.05`. These historical
+measurements used `rel_tol=0.002` for S3-S7; the current S7 default is
+`rel_tol=2e-5` after the later calibration described below.
 
 | Stage | Steady time | Metadata | First call | Steady TFLOPS |
 |---|---:|---:|---:|---:|
@@ -229,6 +230,24 @@ must include metadata preparation.
 
 The independent cuBLASLt reference reaches 271.3 TFLOPS at the same shape.
 S7 reaches approximately 95.3% of that measured library throughput.
+
+## Non-Segmented Threshold Calibration
+
+A K-segmented prototype was evaluated but not retained. Although K32, K64,
+and K128 segments could detect an injected `+1` error, the best K128 variant
+reached only 53.2 TFLOPS because every segment materialized and reloaded C,
+shared storage grew to 167,168 bytes, and occupancy fell to one CTA/SM.
+
+The retained S7 instead keeps full-K ABFT and lowers `rel_tol` from `2e-3` to
+`2e-5`. On the deterministic `4096^3` input, thresholds from `2e-5` upward
+produce zero false-positive tiles, while `1e-5` produces 710. The safety
+margin at `2e-5` preserves S7's 258 TFLOPS performance.
+
+For 1,000 random single faults with uniformly sampled magnitude `[1,256]`,
+random sign, and seed 12345, the selected threshold detects 100% and verifies
+correction for 98.1%. A separate fixed-magnitude `+/-1` campaign detects 11.1%
+and verifies correction for 0.5%, so unit-magnitude errors remain below the
+reliable sensitivity range without K segmentation.
 
 ## Historical Experiments
 

@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Hopper FP8 ABFT GEMM S0-S7 optimization dashboard">
+  <title>Hopper FP8 ABFT GEMM · 优化总览</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <a class="brand" href="#overview" aria-label="返回总览">
+      <span class="brand-mark" aria-hidden="true">FT</span>
+      <span>Hopper FP8 ABFT GEMM</span>
+    </a>
+    <nav class="header-actions" aria-label="页面导航">
+      <a href="#performance">性能数据</a>
+      <a href="#architecture">架构解析</a>
+    </nav>
+  </header>
+
+  <main id="overview">
+    <section class="overview-panel" aria-labelledby="page-title">
+      <div class="stage-strip">
+        <span>S0</span><i></i><span>S1</span><i></i><span>S2</span><i></i><span>S3</span>
+        <i></i><span>S4</span><i></i><span>S5</span><i></i><span>S6</span><i></i><span>S7</span>
+      </div>
+
+      <div class="intro">
+        <div>
+          <p class="eyebrow">NVIDIA Hopper · SM90a · H20</p>
+          <h1 id="page-title">Hopper FP8 ABFT GEMM · 优化总览</h1>
+          <p class="lead">
+            从原生分块 ABFT 到 TMA-WGMMA 融合、元数据缓存、warp-specialized
+            主循环与 2×1 cluster multicast。所有阶段均保留 Tile-local
+            检测与单点纠错。
+          </p>
+        </div>
+        <dl class="summary-metrics">
+          <div>
+            <dt>最终性能</dt>
+            <dd>258.52 <small>TFLOPS</small></dd>
+          </div>
+          <div>
+            <dt>端到端提升</dt>
+            <dd>1740.9×</dd>
+          </div>
+          <div>
+            <dt>cuBLASLt 对齐</dt>
+            <dd>95.3%</dd>
+          </div>
+        </dl>
+      </div>
+
+      <div id="performance" class="content-grid">
+        <section class="chart-section" aria-labelledby="chart-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Steady-state throughput</p>
+              <h2 id="chart-title">性能进化</h2>
+            </div>
+            <span class="axis-note">纵轴为对数刻度</span>
+          </div>
+
+          <div class="chart-wrap">
+            <svg class="performance-chart" viewBox="0 0 920 390" role="img"
+                 aria-labelledby="chart-svg-title chart-svg-desc">
+              <title id="chart-svg-title">S0 到 S7 的 TFLOPS 性能曲线</title>
+              <desc id="chart-svg-desc">性能从 S0 的 0.1485 TFLOPS 提升至 S7 的 258.52 TFLOPS。</desc>
+              <g class="grid-lines" aria-hidden="true">
+                <line x1="70" y1="45" x2="885" y2="45"></line>
+                <line x1="70" y1="112" x2="885" y2="112"></line>
+                <line x1="70" y1="179" x2="885" y2="179"></line>
+                <line x1="70" y1="246" x2="885" y2="246"></line>
+                <line x1="70" y1="313" x2="885" y2="313"></line>
+              </g>
+              <g class="axis-labels" aria-hidden="true">
+                <text x="58" y="50">300</text>
+                <text x="58" y="117">30</text>
+                <text x="58" y="184">3</text>
+                <text x="58" y="251">0.3</text>
+                <text x="58" y="318">0.03</text>
+              </g>
+              <line class="axis-line" x1="70" y1="313" x2="885" y2="313"></line>
+              <path class="area-path"
+                    d="M90 268 L203 252 L316 171 L429 107 L542 102 L655 66 L768 47 L881 43
+                       L881 313 L90 313 Z"></path>
+              <polyline class="series-line"
+                        points="90,268 203,252 316,171 429,107 542,102 655,66 768,47 881,43"></polyline>
+              <g class="data-points">
+                <g class="chart-point" role="button" data-stage="S0" data-value="0.1485" data-note="Native tiled ABFT">
+                  <circle cx="90" cy="268" r="8"></circle>
+                </g>
+                <g class="chart-point" role="button" data-stage="S1" data-value="0.2527" data-note="Batched multi-stream">
+                  <circle cx="203" cy="252" r="8"></circle>
+                </g>
+                <g class="chart-point" role="button" data-stage="S2" data-value="3.90" data-note="CUTE / WGMMA">
+                  <circle cx="316" cy="171" r="8"></circle>
+                </g>
+                <g class="chart-point" role="button" data-stage="S3" data-value="33.21" data-note="TMA + online ABFT">
+                  <circle cx="429" cy="107" r="8"></circle>
+                </g>
+                <g class="chart-point" role="button" data-stage="S4" data-value="39.79" data-note="Cross-CTA input cache">
+                  <circle cx="542" cy="102" r="8"></circle>
+                </g>
+                <g class="chart-point" role="button" data-stage="S5" data-value="132.85" data-note="Expected checksum cache">
+                  <circle cx="655" cy="66" r="8"></circle>
+                </g>
+                <g class="chart-point" role="button" data-stage="S6" data-value="234.08" data-note="Warp-specialized 128×128">
+                  <circle cx="768" cy="47" r="8"></circle>
+                </g>
+                <g class="chart-point is-active" role="button" data-stage="S7" data-value="258.52" data-note="K128 + cluster multicast">
+                  <circle cx="881" cy="43" r="10"></circle>
+                </g>
+              </g>
+              <g class="x-labels" aria-hidden="true">
+                <text x="90" y="346">S0</text><text x="203" y="346">S1</text>
+                <text x="316" y="346">S2</text><text x="429" y="346">S3</text>
+                <text x="542" y="346">S4</text><text x="655" y="346">S5</text>
+                <text x="768" y="346">S6</text><text x="881" y="346">S7</text>
+              </g>
+            </svg>
+            <div id="chart-tooltip" class="chart-tooltip" role="status">
+              <strong>S7 · 258.52 TFLOPS</strong>
+              <span>K128 + cluster multicast</span>
+            </div>
+          </div>
+
+          <div class="stage-cards">
+            <button class="stage-card" type="button" data-stage="S0">
+              <span class="stage-index">S0</span>
+              <strong>0.1485</strong>
+              <small>Native tiled ABFT</small>
+              <em>正确性基线</em>
+            </button>
+            <button class="stage-card" type="button" data-stage="S1">
+              <span class="stage-index">S1</span>
+              <strong>0.2527</strong>
+              <small>Multi-stream</small>
+              <em>1.70×</em>
+            </button>
+            <button class="stage-card" type="button" data-stage="S2">
+              <span class="stage-index">S2</span>
+              <strong>3.90</strong>
+              <small>WGMMA pipeline</small>
+              <em>15.43×</em>
+            </button>
+            <button class="stage-card" type="button" data-stage="S3">
+              <span class="stage-index">S3</span>
+              <strong>33.21</strong>
+              <small>Fused online ABFT</small>
+              <em>8.52×</em>
+            </button>
+            <button class="stage-card" type="button" data-stage="S4">
+              <span class="stage-index">S4</span>
+              <strong>39.79</strong>
+              <small>Input checksum cache</small>
+              <em>1.20×</em>
+            </button>
+            <button class="stage-card" type="button" data-stage="S5">
+              <span class="stage-index">S5</span>
+              <strong>132.85</strong>
+              <small>Expected cache</small>
+              <em>3.34×</em>
+            </button>
+            <button class="stage-card" type="button" data-stage="S6">
+              <span class="stage-index">S6</span>
+              <strong>234.08</strong>
+              <small>Warp-specialized</small>
+              <em>1.76×</em>
+            </button>
+            <button class="stage-card is-active" type="button" data-stage="S7">
+              <span class="stage-index">S7</span>
+              <strong>258.52</strong>
+              <small>K128 + multicast</small>
+              <em>1.10×</em>
+            </button>
+          </div>
+        </section>
+
+        <aside class="comparison" aria-labelledby="comparison-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">Library reference</p>
+              <h2 id="comparison-title">最终对比</h2>
+            </div>
+          </div>
+          <div class="comparison-row">
+            <div class="comparison-label">
+              <span>S7 Cluster Multicast</span><strong>258.52</strong>
+            </div>
+            <div class="bar-track"><i class="bar s7-bar"></i></div>
+          </div>
+          <div class="comparison-row">
+            <div class="comparison-label">
+              <span>cuBLASLt FP8</span><strong>271.3</strong>
+            </div>
+            <div class="bar-track"><i class="bar cublas-bar"></i></div>
+          </div>
+          <div class="ratio-block">
+            <span>达到 cuBLASLt</span>
+            <strong>95.3%</strong>
+            <small>H20 dense FP8 reference</small>
+          </div>
+          <p class="comparison-note">
+            S7 稳态 kernel 为 0.532 ms；metadata 准备为 1.944 ms。
+            A/B 变化时应使用 first-call 2.476 ms，而非仅引用稳态数据。
+          </p>
+        </aside>
+      </div>
+
+      <section id="architecture" class="architecture" aria-labelledby="architecture-title">
+        <div class="section-heading architecture-heading">
+          <div>
+            <p class="section-kicker">S7 execution model</p>
+            <h2 id="architecture-title">最终架构</h2>
+          </div>
+          <p>搬运、Tensor Core 计算与 ABFT 校验解耦，并通过 cluster 复用 A Tile。</p>
+        </div>
+
+        <div class="architecture-scroll">
+          <div class="architecture-flow">
+            <div class="flow-node input-node">
+              <span class="node-icon">A/B</span>
+              <strong>Global FP8</strong>
+              <small>E4M3 inputs</small>
+            </div>
+            <div class="flow-arrow"><span>TMA</span></div>
+            <div class="flow-node producer-node">
+              <span class="node-icon">P</span>
+              <strong>Producer Warp</strong>
+              <small>3-stage · K128</small>
+              <b>2×1 A multicast</b>
+            </div>
+            <div class="flow-arrow"><span>mbarrier</span></div>
+            <div class="flow-node compute-node">
+              <span class="node-icon">2×</span>
+              <strong>WGMMA Consumers</strong>
+              <small>m64n128k32 × 4</small>
+              <b>FP32 accumulation</b>
+            </div>
+            <div class="flow-arrow"><span>shared C</span></div>
+            <div class="flow-node verify-node">
+              <span class="node-icon">4×</span>
+              <strong>Verifier Warps</strong>
+              <small>4 × 64×64 subtiles</small>
+              <b>detect · locate · correct</b>
+            </div>
+            <div class="flow-arrow final-arrow"><span>store</span></div>
+            <div class="flow-node output-node">
+              <span class="node-icon">C</span>
+              <strong>Corrected FP32</strong>
+              <small>single global store</small>
+            </div>
+          </div>
+        </div>
+
+        <div class="principles">
+          <article>
+            <span>01</span>
+            <div><strong>K128 stage</strong><p>一次同步连续发射 4 个 K32 WGMMA，摊销 barrier 与 descriptor 开销。</p></div>
+          </article>
+          <article>
+            <span>02</span>
+            <div><strong>Cluster multicast</strong><p>相邻 N 方向 CTA 共享 A，B 仍独立加载，降低 global traffic。</p></div>
+          </article>
+          <article>
+            <span>03</span>
+            <div><strong>Lifetime aliasing</strong><p>A/B mainloop 与 C epilogue 复用 shared storage，维持 2 CTA/SM。</p></div>
+          </article>
+        </div>
+      </section>
+
+      <footer class="panel-footer">
+        <span>NVIDIA H20 · M=N=K=4096 · CUDA_VISIBLE_DEVICES=1</span>
+        <span>FP8 E4M3 inputs · FP32 accumulation/output</span>
+      </footer>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

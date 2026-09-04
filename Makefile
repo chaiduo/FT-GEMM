@@ -6,6 +6,11 @@ CUTLASS_ARCH_FLAGS ?= -gencode arch=compute_90a,code=sm_90a \
 	-gencode arch=compute_90a,code=compute_90a
 BUILD_DIR ?= build
 STAGE_DIR := src
+FAULT_TRIALS ?= 100
+FAULT_MIN_VALUE ?= 1
+FAULT_MAX_VALUE ?= 256
+FAULT_SEED ?= 12345
+FAULT_REL_TOL ?= 0.00002
 CUTLASS_ROOT ?= /data01/docker/overlay2/350eb5e5f9f6bcd790bb1206eaee8cf86c207c2589b3dee54c78dacab78d8cfe/diff/usr/local/lib/python3.12/dist-packages/flashinfer/data/cutlass
 
 TARGET := $(BUILD_DIR)/abft_fp8_gemm
@@ -33,9 +38,10 @@ STAGE4_TARGET := $(BUILD_DIR)/stage4_cached_input_abft_fp8_gemm
 STAGE5_TARGET := $(BUILD_DIR)/stage5_expected_cache_abft_fp8_gemm
 STAGE6_TARGET := $(BUILD_DIR)/stage6_warpspecialized_abft_fp8_gemm
 STAGE7_TARGET := $(BUILD_DIR)/stage7_cluster_multicast_abft_fp8_gemm
+S7_FAULT_CAMPAIGN_TARGET := $(BUILD_DIR)/s7_random_fault_campaign
 WGMMA_TARGET := $(BUILD_DIR)/wgmma_fp8_abft
 
-.PHONY: all key_stages stage0 stage1 stage2 stage3 stage4 stage5 stage6 stage7 native_v0 native_v1 native_v2 native_v3 wgmma_v4 wgmma_v5 wgmma_v6 wgmma_v7 wgmma_v8 wgmma_v9 wgmma_v10 wgmma_v11 wgmma_v12 wgmma_v13 cublaslt_fp8 cutlass raw_wgmma clean run fault
+.PHONY: all key_stages stage0 stage1 stage2 stage3 stage4 stage5 stage6 stage7 s7_fault_campaign native_v0 native_v1 native_v2 native_v3 wgmma_v4 wgmma_v5 wgmma_v6 wgmma_v7 wgmma_v8 wgmma_v9 wgmma_v10 wgmma_v11 wgmma_v12 wgmma_v13 cublaslt_fp8 cutlass raw_wgmma clean run fault
 
 all: key_stages
 
@@ -56,6 +62,9 @@ stage5: $(STAGE5_TARGET)
 stage6: $(STAGE6_TARGET)
 
 stage7: $(STAGE7_TARGET)
+
+s7_fault_campaign: $(S7_FAULT_CAMPAIGN_TARGET)
+	CUDA_VISIBLE_DEVICES=1 ./$(S7_FAULT_CAMPAIGN_TARGET) --m 4096 --n 4096 --k 4096 --warmup 1 --repeat 1 --rel-tol $(FAULT_REL_TOL) --fault-min-value $(FAULT_MIN_VALUE) --fault-max-value $(FAULT_MAX_VALUE) --fault-trials $(FAULT_TRIALS) --fault-seed $(FAULT_SEED)
 
 native_v0: $(V0_NATIVE_TARGET)
 
@@ -119,6 +128,9 @@ $(STAGE6_TARGET): $(STAGE_DIR)/s6_warpspecialized_abft_fp8_gemm.cu | $(BUILD_DIR
 	$(NVCC) $(NVCCFLAGS) --expt-relaxed-constexpr $(CUTLASS_ARCH_FLAGS) -I$(CUTLASS_ROOT)/include $< -o $@
 
 $(STAGE7_TARGET): $(STAGE_DIR)/s7_cluster_multicast_abft_fp8_gemm.cu | $(BUILD_DIR)
+	$(NVCC) $(NVCCFLAGS) --expt-relaxed-constexpr $(CUTLASS_ARCH_FLAGS) -I$(CUTLASS_ROOT)/include $< -o $@
+
+$(S7_FAULT_CAMPAIGN_TARGET): $(STAGE_DIR)/s7_random_fault_campaign.cu | $(BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) --expt-relaxed-constexpr $(CUTLASS_ARCH_FLAGS) -I$(CUTLASS_ROOT)/include $< -o $@
 
 $(V0_NATIVE_TARGET): src/v0_native_fp8_gemm.cu | $(BUILD_DIR)
