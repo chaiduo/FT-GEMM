@@ -29,6 +29,75 @@ Each stage is a standalone source file under `src/`:
 ABFT detection is enabled from S0 onward. GEMM-only implementations remain
 available as comparison baselines but are not part of this primary chain.
 
+## GEMM + Softmax Cross-Nonlinearity ABFT
+
+`src/gemm_softmax_abft.cu` is a correctness-first prototype that detects a
+single corrupted GEMM logit after row-wise Softmax. It is separate from S0-S7
+because it demonstrates a nonlinear invariant, not a faster GEMM stage.
+
+For `C = scale * A * B^T`, use the unique zero-sum position weight:
+
+```text
+w_j = 2*j - (N - 1)
+sum_j w_j = 0
+```
+
+The FP8 inputs independently produce the expected logit projections:
+
+```text
+Expected0_i = scale * sum_k A_ik * (sum_j B_jk)
+Expected1_i = scale * sum_k A_ik * (sum_j w_j * B_jk)
+```
+
+After Softmax, stable log-softmax values and the row `logZ` produce:
+
+```text
+Actual0_i = sum_j log(P_ij) + N * logZ_i
+Actual1_i = sum_j w_j * log(P_ij)
+```
+
+For one pre-Softmax fault `C_if += delta`:
+
+```text
+Residual0 = Actual0_i - Expected0_i = delta
+Residual1 = Actual1_i - Expected1_i = w_f * delta
+
+w_f       = Residual1 / Residual0
+fault_col = (w_f + N - 1) / 2
+```
+
+The prototype corrects the located logit by `-Residual0`, reruns Softmax, and
+compares the recovered probability row with a clean reference. It also checks
+the stored FP32 probability row sum. Stable log-softmax values are used
+directly, so valid probability underflow is not treated as a fault.
+
+Build and run:
+
+```bash
+make gemm_softmax_abft
+CUDA_VISIBLE_DEVICES=1 ./build/gemm_softmax_abft \
+  --m 128 --n 128 --k 128 \
+  --fault-row 31 --fault-col 73 --fault-value 1
+```
+
+Run the clean false-positive check:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 ./build/gemm_softmax_abft \
+  --m 1024 --n 1024 --k 1024 --no-fault
+```
+
+An injected-fault run returns failure if the fault is missed, cannot be
+located, or the recovered probabilities differ from the clean reference.
+Thresholds are configurable with `--abs-tol`, `--rel-tol`,
+`--row-sum-tol`, and `--location-tol`.
+
+The covered fault boundary is the GEMM/logit path before Softmax. A fault in
+A or B that identically affects both GEMM and the independent projection is a
+common-mode error and requires protected inputs or another independent path.
+A fault after the final probability store requires readback or a downstream
+checksum.
+
 Build all stages:
 
 ```bash
