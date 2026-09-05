@@ -6,7 +6,8 @@ Hopper/SM90, with FP32 accumulation and output.
 ## Visualization Dashboard
 
 Open [`web/index.html`](web/index.html) directly in a browser to explore the
-S0-S7 throughput progression, cuBLASLt comparison, and S7 execution pipeline.
+dark optimization worklog, source excerpts, stage-level principle diagrams,
+S0-S7 throughput progression, and cuBLASLt comparison.
 
 ## Curated Optimization Chain
 
