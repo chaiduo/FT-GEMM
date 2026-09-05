@@ -9,6 +9,8 @@ Open [`web/index.html`](web/index.html) directly in a browser to explore the
 dark optimization worklog, source excerpts, stage-level principle diagrams,
 S0-S7 throughput progression, and cuBLASLt comparison.
 
+**Online demo:** [https://chaiduo.github.io/FT-GEMM/](https://chaiduo.github.io/FT-GEMM/)
+
 ## Curated Optimization Chain
 
 Each stage is a standalone source file under `src/`:
