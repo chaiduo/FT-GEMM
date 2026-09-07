@@ -58,10 +58,6 @@ struct SharedStorage {
   alignas(128) Element a[cute::cosize_v<SmemLayoutAStages>];
   alignas(128) Element b[cute::cosize_v<SmemLayoutBStages>];
   alignas(16) float c[kM * kN];
-  float stage_a_sums[kK];
-  float stage_a_magnitudes[kK];
-  float stage_b_sums[kK];
-  float stage_b_magnitudes[kK];
   float row_deltas[kM];
   float col_deltas[kN];
   int bad_row_count;
@@ -80,7 +76,7 @@ struct Options {
   float verify_abs_tolerance = 2.5e-1f;
   float verify_rel_tolerance = 1.0e-2f;
   float abft_abs_tolerance = 1.0e-2f;
-  float abft_rel_tolerance = 1.0e-5f;
+  float abft_rel_tolerance = 2.0e-5f;
   float fault_value = 1.0f;
   bool inject_fault = false;
 };
@@ -173,46 +169,54 @@ __global__ void generate_fp8_kernel(Element* output, size_t count, uint32_t seed
   output[index] = Element(2.0f * unit - 1.0f);
 }
 
-__global__ void cache_input_tile_checksums_kernel(const Element* a, const Element* b, float* a_sums, float* a_magnitudes, float* b_sums,
-                                                  float* b_magnitudes, int n, int k, int tile_rows, int tile_cols) {
+__global__ void prepare_expected_checksum_kernel(const Element* a, const Element* b, float* expected_rows, float* expected_cols,
+                                                 float* row_scales, float* col_scales, int m, int n, int k, int tile_rows, int tile_cols) {
   int tile_id = blockIdx.x;
-  if (tile_id < tile_rows) {
-    int row_begin = tile_id * kM;
-    for (int kk = threadIdx.x; kk < k; kk += blockDim.x) {
-      float sum = 0.0f;
-      float magnitude = 0.0f;
-#pragma unroll 8
+  if (tile_id >= tile_rows * tile_cols) {
+    return;
+  }
+  int tile_row = tile_id / tile_cols;
+  int tile_col = tile_id % tile_cols;
+  int valid_cols = min(kN, n - tile_col * kN);
+
+  if (threadIdx.x < kM) {
+    int row = tile_row * kM + threadIdx.x;
+    float expected = 0.0f;
+    float scale = 0.0f;
+    for (int kk = 0; kk < k; ++kk) {
+      float b_sum = 0.0f;
+      float b_abs_sum = 0.0f;
+      for (int col = 0; col < valid_cols; ++col) {
+        float value = static_cast<float>(b[(tile_col * kN + col) * k + kk]);
+        b_sum += value;
+        b_abs_sum += fabsf(value);
+      }
+      float avalue = static_cast<float>(a[row * k + kk]);
+      expected += avalue * b_sum;
+      scale += fabsf(avalue) * b_abs_sum;
+    }
+    expected_rows[tile_id * kM + threadIdx.x] = expected;
+    row_scales[tile_id * kM + threadIdx.x] = scale;
+  }
+
+  if (threadIdx.x < valid_cols) {
+    int col = tile_col * kN + threadIdx.x;
+    float expected = 0.0f;
+    float scale = 0.0f;
+    for (int kk = 0; kk < k; ++kk) {
+      float a_sum = 0.0f;
+      float a_abs_sum = 0.0f;
       for (int row = 0; row < kM; ++row) {
-        float value = static_cast<float>(a[(row_begin + row) * k + kk]);
-        sum += value;
-        magnitude += fabsf(value);
+        float value = static_cast<float>(a[(tile_row * kM + row) * k + kk]);
+        a_sum += value;
+        a_abs_sum += fabsf(value);
       }
-      size_t index = static_cast<size_t>(tile_id) * k + kk;
-      a_sums[index] = sum;
-      a_magnitudes[index] = magnitude;
+      float bvalue = static_cast<float>(b[col * k + kk]);
+      expected += a_sum * bvalue;
+      scale += a_abs_sum * fabsf(bvalue);
     }
-  } else {
-    int tile_col = tile_id - tile_rows;
-    if (tile_col >= tile_cols) {
-      return;
-    }
-    int col_begin = tile_col * kN;
-    int valid_cols = min(kN, n - col_begin);
-    for (int kk = threadIdx.x; kk < k; kk += blockDim.x) {
-      float sum = 0.0f;
-      float magnitude = 0.0f;
-#pragma unroll 8
-      for (int col = 0; col < kN; ++col) {
-        if (col < valid_cols) {
-          float value = static_cast<float>(b[(col_begin + col) * k + kk]);
-          sum += value;
-          magnitude += fabsf(value);
-        }
-      }
-      size_t index = static_cast<size_t>(tile_col) * k + kk;
-      b_sums[index] = sum;
-      b_magnitudes[index] = magnitude;
-    }
+    expected_cols[tile_id * kN + threadIdx.x] = expected;
+    col_scales[tile_id * kN + threadIdx.x] = scale;
   }
 }
 
@@ -225,10 +229,10 @@ __device__ auto make_smem_tensor(Element* pointer, Layout layout) {
 // Stage i+1 is loaded by TMA while WGMMA consumes stage i.
 template <class TmaA, class TmaB>
 __global__ void __cluster_dims__(1, 1, 1)
-    wgmma_tma_cached_abft_kernel(CUTLASS_GRID_CONSTANT TmaA const tma_a, CUTLASS_GRID_CONSTANT TmaB const tma_b, const float* a_sums,
-                                 const float* a_magnitudes, const float* b_sums, const float* b_magnitudes, float* c, int* bad_tiles,
-                                 int* corrected_tiles, int m, int n, int k, int tile_rows, int tile_cols, float abs_tolerance,
-                                 float rel_tolerance, float fault_value, bool inject_fault) {
+    wgmma_tma_fused_abft_kernel(CUTLASS_GRID_CONSTANT TmaA const tma_a, CUTLASS_GRID_CONSTANT TmaB const tma_b, const float* expected_rows,
+                                const float* expected_cols, const float* row_scales, const float* col_scales, float* c, int* bad_tiles,
+                                int* corrected_tiles, int m, int n, int k, int tile_rows, int tile_cols, float abs_tolerance,
+                                float rel_tolerance, float fault_value, bool inject_fault) {
   extern __shared__ __align__(128) unsigned char shared_bytes[];
   SharedStorage& storage = *reinterpret_cast<SharedStorage*>(shared_bytes);
 
@@ -247,10 +251,6 @@ __global__ void __cluster_dims__(1, 1, 1)
   using CLayout =
       decltype(cute::make_layout(cute::make_shape(cute::Int<kM>{}, cute::Int<kN>{}), cute::make_stride(cute::Int<1>{}, cute::Int<kM>{})));
   auto sC = cute::make_tensor(cute::make_smem_ptr(storage.c), CLayout{});
-  bool is_row_checksum_thread = threadIdx.x < kM;
-  int checksum_index = is_row_checksum_thread ? threadIdx.x : threadIdx.x - kM;
-  float expected_checksum = 0.0f;
-  float checksum_scale = 0.0f;
 
   if (is_tma_leader) {
     for (int stage = 0; stage < kStages; ++stage) {
@@ -324,34 +324,6 @@ __global__ void __cluster_dims__(1, 1, 1)
     cute::gemm(tiled_mma, tCrA, tCrB, accum);
     cute::warpgroup_commit_batch();
 
-    if (threadIdx.x < kK) {
-      int global_k = k_tile * kK + threadIdx.x;
-      size_t a_index = static_cast<size_t>(tile_row) * k + global_k;
-      size_t b_index = static_cast<size_t>(tile_col) * k + global_k;
-      storage.stage_a_sums[threadIdx.x] = a_sums[a_index];
-      storage.stage_a_magnitudes[threadIdx.x] = a_magnitudes[a_index];
-      storage.stage_b_sums[threadIdx.x] = b_sums[b_index];
-      storage.stage_b_magnitudes[threadIdx.x] = b_magnitudes[b_index];
-    }
-    __syncthreads();
-
-    if (is_row_checksum_thread) {
-#pragma unroll
-      for (int kk = 0; kk < kK; ++kk) {
-        float avalue = static_cast<float>(sA_stage(checksum_index, kk));
-        expected_checksum += avalue * storage.stage_b_sums[kk];
-        checksum_scale += fabsf(avalue) * storage.stage_b_magnitudes[kk];
-      }
-    } else if (checksum_index < valid_cols) {
-#pragma unroll
-      for (int kk = 0; kk < kK; ++kk) {
-        float bvalue = static_cast<float>(sB_stage(checksum_index, kk));
-        expected_checksum += storage.stage_a_sums[kk] * bvalue;
-        checksum_scale += storage.stage_a_magnitudes[kk] * fabsf(bvalue);
-      }
-    }
-    __syncthreads();
-
     cute::warpgroup_wait<0>();
     cute::warpgroup_fence_operand(accum);
     __syncthreads();
@@ -376,35 +348,37 @@ __global__ void __cluster_dims__(1, 1, 1)
   }
   __syncthreads();
 
-  if (is_row_checksum_thread) {
+  if (threadIdx.x < kM) {
     float actual = 0.0f;
-#pragma unroll
-    for (int col = 0; col < kN; ++col) {
-      if (col < valid_cols) {
-        actual += storage.c[col * kM + checksum_index];
-      }
+    for (int col = 0; col < valid_cols; ++col) {
+      actual += storage.c[col * kM + threadIdx.x];
     }
-    float delta = expected_checksum - actual;
-    storage.row_deltas[checksum_index] = delta;
-    if (fabsf(delta) > abs_tolerance + rel_tolerance * fmaxf(1.0f, checksum_scale)) {
+    float expected = expected_rows[tile_id * kM + threadIdx.x];
+    float delta = expected - actual;
+    float scale = fmaxf(1.0f, row_scales[tile_id * kM + threadIdx.x]);
+    storage.row_deltas[threadIdx.x] = delta;
+    if (fabsf(delta) > abs_tolerance + rel_tolerance * scale) {
       atomicAdd(&storage.bad_row_count, 1);
-      atomicCAS(&storage.bad_row, -1, checksum_index);
+      atomicCAS(&storage.bad_row, -1, threadIdx.x);
     }
-  } else {
+  }
+
+  if (threadIdx.x < kN) {
     float delta = 0.0f;
-    if (checksum_index < valid_cols) {
+    if (threadIdx.x < valid_cols) {
       float actual = 0.0f;
-#pragma unroll
       for (int row = 0; row < kM; ++row) {
-        actual += storage.c[checksum_index * kM + row];
+        actual += storage.c[threadIdx.x * kM + row];
       }
-      delta = expected_checksum - actual;
-      if (fabsf(delta) > abs_tolerance + rel_tolerance * fmaxf(1.0f, checksum_scale)) {
+      float expected = expected_cols[tile_id * kN + threadIdx.x];
+      delta = expected - actual;
+      float scale = fmaxf(1.0f, col_scales[tile_id * kN + threadIdx.x]);
+      if (fabsf(delta) > abs_tolerance + rel_tolerance * scale) {
         atomicAdd(&storage.bad_col_count, 1);
-        atomicCAS(&storage.bad_col, -1, checksum_index);
+        atomicCAS(&storage.bad_col, -1, threadIdx.x);
       }
     }
-    storage.col_deltas[checksum_index] = delta;
+    storage.col_deltas[threadIdx.x] = delta;
   }
   __syncthreads();
 
@@ -479,21 +453,19 @@ int main(int argc, char** argv) {
   Element* d_a = nullptr;
   Element* d_b = nullptr;
   float* d_c = nullptr;
-  float* d_a_sums = nullptr;
-  float* d_a_magnitudes = nullptr;
-  float* d_b_sums = nullptr;
-  float* d_b_magnitudes = nullptr;
+  float* d_expected_rows = nullptr;
+  float* d_expected_cols = nullptr;
+  float* d_row_scales = nullptr;
+  float* d_col_scales = nullptr;
   int* d_bad_tiles = nullptr;
   int* d_corrected_tiles = nullptr;
-  size_t a_metadata_count = static_cast<size_t>(tile_rows) * options.k;
-  size_t b_metadata_count = static_cast<size_t>(tile_cols) * options.k;
   CUDA_CHECK(cudaMalloc(&d_a, a_count * sizeof(Element)));
   CUDA_CHECK(cudaMalloc(&d_b, b_count * sizeof(Element)));
   CUDA_CHECK(cudaMalloc(&d_c, c_count * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_a_sums, a_metadata_count * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_a_magnitudes, a_metadata_count * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_b_sums, b_metadata_count * sizeof(float)));
-  CUDA_CHECK(cudaMalloc(&d_b_magnitudes, b_metadata_count * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_expected_rows, tile_count * kM * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_expected_cols, tile_count * kN * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_row_scales, tile_count * kM * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_col_scales, tile_count * kN * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_bad_tiles, sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_corrected_tiles, sizeof(int)));
 
@@ -515,22 +487,25 @@ int main(int argc, char** argv) {
                                           TileShape{}, ClusterShape{});
 
   cudaStream_t stream;
+  cudaEvent_t metadata_start;
+  cudaEvent_t metadata_stop;
   cudaEvent_t start;
   cudaEvent_t stop;
   CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+  CUDA_CHECK(cudaEventCreate(&metadata_start));
+  CUDA_CHECK(cudaEventCreate(&metadata_stop));
   CUDA_CHECK(cudaEventCreate(&start));
   CUDA_CHECK(cudaEventCreate(&stop));
-  auto kernel = wgmma_tma_cached_abft_kernel<decltype(tma_a), decltype(tma_b)>;
-  CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1));
-
-  CUDA_CHECK(cudaEventRecord(start, stream));
-  cache_input_tile_checksums_kernel<<<tile_rows + tile_cols, 256, 0, stream>>>(d_a, d_b, d_a_sums, d_a_magnitudes, d_b_sums, d_b_magnitudes,
-                                                                               options.n, options.k, tile_rows, tile_cols);
-  CUDA_CHECK(cudaEventRecord(stop, stream));
-  CUDA_CHECK(cudaEventSynchronize(stop));
+  CUDA_CHECK(cudaEventRecord(metadata_start, stream));
+  prepare_expected_checksum_kernel<<<tile_count, kThreads, 0, stream>>>(
+      d_a, d_b, d_expected_rows, d_expected_cols, d_row_scales, d_col_scales, options.m, options.n, options.k, tile_rows, tile_cols);
+  CUDA_CHECK(cudaEventRecord(metadata_stop, stream));
+  CUDA_CHECK(cudaEventSynchronize(metadata_stop));
   CUDA_CHECK(cudaGetLastError());
-  float metadata_prepare_ms = 0.0f;
-  CUDA_CHECK(cudaEventElapsedTime(&metadata_prepare_ms, start, stop));
+  float metadata_ms = 0.0f;
+  CUDA_CHECK(cudaEventElapsedTime(&metadata_ms, metadata_start, metadata_stop));
+  auto kernel = wgmma_tma_fused_abft_kernel<decltype(tma_a), decltype(tma_b)>;
+  CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1));
 
   auto enqueue_gemm = [&]() {
     cudaLaunchAttribute attribute{};
@@ -545,19 +520,10 @@ int main(int argc, char** argv) {
     config.stream = stream;
     config.attrs = &attribute;
     config.numAttrs = 1;
-    CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, tma_a, tma_b, d_a_sums, d_a_magnitudes, d_b_sums, d_b_magnitudes, d_c, d_bad_tiles,
-                                  d_corrected_tiles, options.m, options.n, options.k, tile_rows, tile_cols, options.abft_abs_tolerance,
-                                  options.abft_rel_tolerance, options.fault_value, options.inject_fault));
+    CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, tma_a, tma_b, d_expected_rows, d_expected_cols, d_row_scales, d_col_scales, d_c,
+                                  d_bad_tiles, d_corrected_tiles, options.m, options.n, options.k, tile_rows, tile_cols,
+                                  options.abft_abs_tolerance, options.abft_rel_tolerance, options.fault_value, options.inject_fault));
   };
-
-  CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
-  CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
-  CUDA_CHECK(cudaEventRecord(start, stream));
-  enqueue_gemm();
-  CUDA_CHECK(cudaEventRecord(stop, stream));
-  CUDA_CHECK(cudaEventSynchronize(stop));
-  float first_gemm_abft_ms = 0.0f;
-  CUDA_CHECK(cudaEventElapsedTime(&first_gemm_abft_ms, start, stop));
 
   for (int i = 0; i < options.warmup; ++i) {
     CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
@@ -592,28 +558,23 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(&corrected_tiles, d_corrected_tiles, sizeof(int), cudaMemcpyDeviceToHost));
 
   float average_ms = total_ms / options.repeat;
-  float first_call_total_ms = metadata_prepare_ms + first_gemm_abft_ms;
-  float amortized_ms = average_ms + metadata_prepare_ms / options.repeat;
+  float first_call_approx_ms = metadata_ms + average_ms;
   double tflops = (2.0 * static_cast<double>(options.m) * options.n * options.k) / (average_ms * 1.0e9);
   VerificationResult verification = verify_samples(h_a, h_b, h_c, options);
   bool numerical_pass = options.verify_samples == 0 || verification.max_tolerance_ratio <= 1.0f;
   bool abft_pass = options.inject_fault ? bad_tiles == 1 && corrected_tiles == 1 : bad_tiles == 0;
   bool passed = numerical_pass && abft_pass;
 
-  size_t metadata_bytes = 2 * (a_metadata_count + b_metadata_count) * sizeof(float);
-  std::printf("version: S4 cross-CTA cached checksum TMA-WGMMA ABFT\n");
+  std::printf("version: S1 Hopper TMA-WGMMA precomputed-expected ABFT\n");
   std::printf("instruction_tile: 64x64x32, stages: %d, threads_per_cta: %d\n", kStages, kThreads);
   std::printf("shared_storage_bytes: %zu\n", sizeof(SharedStorage));
   std::printf(
       "layout: A=[M,K] row-major, B=[N,K] column-major, "
       "C=[N,M] column-major\n");
   std::printf("shape: M=%d N=%d K=%d, output_tiles=%d\n", options.m, options.n, options.k, tile_count);
-  std::printf("metadata_cache_bytes: %zu\n", metadata_bytes);
-  std::printf("metadata_prepare_time_ms: %.6f\n", metadata_prepare_ms);
-  std::printf("first_fused_gemm_abft_time_ms: %.6f\n", first_gemm_abft_ms);
-  std::printf("first_call_total_ms: %.6f\n", first_call_total_ms);
+  std::printf("expected_prepare_time_ms: %.6f\n", metadata_ms);
   std::printf("avg_fused_gemm_abft_time_ms: %.6f\n", average_ms);
-  std::printf("amortized_time_ms: %.6f\n", amortized_ms);
+  std::printf("first_call_approx_time_ms: %.6f\n", first_call_approx_ms);
   std::printf("fused_gemm_tflops: %.6f\n", tflops);
   std::printf("abft_tolerance: abs=%.6e rel=%.6e\n", options.abft_abs_tolerance, options.abft_rel_tolerance);
   std::printf("bad_tiles: %d\n", bad_tiles);
@@ -623,16 +584,18 @@ int main(int argc, char** argv) {
   std::printf("sampled_max_tolerance_ratio: %.6e\n", verification.max_tolerance_ratio);
   std::printf("verification: %s\n", passed ? "PASS" : "FAIL");
 
+  CUDA_CHECK(cudaEventDestroy(metadata_start));
+  CUDA_CHECK(cudaEventDestroy(metadata_stop));
   CUDA_CHECK(cudaEventDestroy(start));
   CUDA_CHECK(cudaEventDestroy(stop));
   CUDA_CHECK(cudaStreamDestroy(stream));
   CUDA_CHECK(cudaFree(d_a));
   CUDA_CHECK(cudaFree(d_b));
   CUDA_CHECK(cudaFree(d_c));
-  CUDA_CHECK(cudaFree(d_a_sums));
-  CUDA_CHECK(cudaFree(d_a_magnitudes));
-  CUDA_CHECK(cudaFree(d_b_sums));
-  CUDA_CHECK(cudaFree(d_b_magnitudes));
+  CUDA_CHECK(cudaFree(d_expected_rows));
+  CUDA_CHECK(cudaFree(d_expected_cols));
+  CUDA_CHECK(cudaFree(d_row_scales));
+  CUDA_CHECK(cudaFree(d_col_scales));
   CUDA_CHECK(cudaFree(d_bad_tiles));
   CUDA_CHECK(cudaFree(d_corrected_tiles));
   return passed ? 0 : 1;

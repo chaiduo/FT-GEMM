@@ -132,14 +132,67 @@ __global__ void native_tiled_fp8_gemm_kernel(const Element* a, const Element* b,
   }
 }
 
+__global__ void prepare_expected_checksum_kernel(const Element* a, const Element* b, float* expected_rows, float* expected_cols,
+                                                 float* row_scales, float* col_scales, int m, int n, int k, int tile_rows, int tile_cols) {
+  int tile_id = blockIdx.x;
+  if (tile_id >= tile_rows * tile_cols) {
+    return;
+  }
+  int tile_row = tile_id / tile_cols;
+  int tile_col = tile_id % tile_cols;
+  int valid_rows = min(kTile, m - tile_row * kTile);
+  int valid_cols = min(kTile, n - tile_col * kTile);
+
+  if (threadIdx.x < valid_rows) {
+    int row = tile_row * kTile + threadIdx.x;
+    float expected = 0.0f;
+    float scale = 0.0f;
+    for (int kk = 0; kk < k; ++kk) {
+      float b_sum = 0.0f;
+      float b_abs_sum = 0.0f;
+      for (int local_col = 0; local_col < valid_cols; ++local_col) {
+        float value = static_cast<float>(b[kk * n + tile_col * kTile + local_col]);
+        b_sum += value;
+        b_abs_sum += fabsf(value);
+      }
+      float avalue = static_cast<float>(a[row * k + kk]);
+      expected += avalue * b_sum;
+      scale += fabsf(avalue) * b_abs_sum;
+    }
+    expected_rows[tile_id * kTile + threadIdx.x] = expected;
+    row_scales[tile_id * kTile + threadIdx.x] = scale;
+  }
+
+  if (threadIdx.x < valid_cols) {
+    int col = tile_col * kTile + threadIdx.x;
+    float expected = 0.0f;
+    float scale = 0.0f;
+    for (int kk = 0; kk < k; ++kk) {
+      float a_sum = 0.0f;
+      float a_abs_sum = 0.0f;
+      for (int local_row = 0; local_row < valid_rows; ++local_row) {
+        float value = static_cast<float>(a[(tile_row * kTile + local_row) * k + kk]);
+        a_sum += value;
+        a_abs_sum += fabsf(value);
+      }
+      float bvalue = static_cast<float>(b[kk * n + col]);
+      expected += a_sum * bvalue;
+      scale += a_abs_sum * fabsf(bvalue);
+    }
+    expected_cols[tile_id * kTile + threadIdx.x] = expected;
+    col_scales[tile_id * kTile + threadIdx.x] = scale;
+  }
+}
+
 __device__ __forceinline__ bool checksum_bad(float actual, float expected, float scale, float abs_tolerance, float rel_tolerance) {
   return fabsf(actual - expected) > abs_tolerance + rel_tolerance * fmaxf(1.0f, scale);
 }
 
-// One CTA owns one C tile. It computes expected checksums from A/B directly,
-// so V2 remains a simple standalone ABFT reference before metadata caching.
-__global__ void tile_abft_kernel(const Element* a, const Element* b, float* c, int m, int n, int k, int tile_rows, int tile_cols,
-                                 float abs_tolerance, float rel_tolerance, bool inject_fault, int* bad_tiles, int* corrected_tiles) {
+// One CTA owns one C tile. Expected checksums are prepared before GEMM;
+// this kernel computes actual checksums, compares them, and corrects C.
+__global__ void tile_abft_kernel(float* c, const float* expected_rows, const float* expected_cols, const float* row_scales,
+                                 const float* col_scales, int m, int n, int tile_rows, int tile_cols, float abs_tolerance,
+                                 float rel_tolerance, bool inject_fault, int* bad_tiles, int* corrected_tiles) {
   __shared__ float c_tile[kTile][kTile];
   __shared__ int bad_row_count;
   __shared__ int bad_col_count;
@@ -183,23 +236,11 @@ __global__ void tile_abft_kernel(const Element* a, const Element* b, float* c, i
 
   if (threadIdx.x == 0 && threadIdx.y < valid_rows) {
     float actual = 0.0f;
-    float expected = 0.0f;
-    float scale = 0.0f;
     for (int local_col = 0; local_col < valid_cols; ++local_col) {
       actual += c_tile[threadIdx.y][local_col];
     }
-    for (int kk = 0; kk < k; ++kk) {
-      float b_sum = 0.0f;
-      float b_abs_sum = 0.0f;
-      for (int local_col = 0; local_col < valid_cols; ++local_col) {
-        float value = static_cast<float>(b[kk * n + tile_col * kTile + local_col]);
-        b_sum += value;
-        b_abs_sum += fabsf(value);
-      }
-      float avalue = static_cast<float>(a[row * k + kk]);
-      expected += avalue * b_sum;
-      scale += fabsf(avalue) * b_abs_sum;
-    }
+    float expected = expected_rows[tile_id * kTile + threadIdx.y];
+    float scale = row_scales[tile_id * kTile + threadIdx.y];
     row_deltas[threadIdx.y] = expected - actual;
     if (checksum_bad(actual, expected, scale, abs_tolerance, rel_tolerance)) {
       atomicAdd(&bad_row_count, 1);
@@ -209,23 +250,11 @@ __global__ void tile_abft_kernel(const Element* a, const Element* b, float* c, i
 
   if (threadIdx.y == 0 && threadIdx.x < valid_cols) {
     float actual = 0.0f;
-    float expected = 0.0f;
-    float scale = 0.0f;
     for (int local_row = 0; local_row < valid_rows; ++local_row) {
       actual += c_tile[local_row][threadIdx.x];
     }
-    for (int kk = 0; kk < k; ++kk) {
-      float a_sum = 0.0f;
-      float a_abs_sum = 0.0f;
-      for (int local_row = 0; local_row < valid_rows; ++local_row) {
-        float value = static_cast<float>(a[(tile_row * kTile + local_row) * k + kk]);
-        a_sum += value;
-        a_abs_sum += fabsf(value);
-      }
-      float bvalue = static_cast<float>(b[kk * n + tile_col * kTile + threadIdx.x]);
-      expected += a_sum * bvalue;
-      scale += a_abs_sum * fabsf(bvalue);
-    }
+    float expected = expected_cols[tile_id * kTile + threadIdx.x];
+    float scale = col_scales[tile_id * kTile + threadIdx.x];
     col_deltas[threadIdx.x] = expected - actual;
     if (checksum_bad(actual, expected, scale, abs_tolerance, rel_tolerance)) {
       atomicAdd(&bad_col_count, 1);
@@ -279,11 +308,19 @@ int main(int argc, char** argv) {
   Element* d_a = nullptr;
   Element* d_b = nullptr;
   float* d_c = nullptr;
-  int* d_bad_tiles = nullptr;
-  int* d_corrected_tiles = nullptr;
+  float* d_expected_rows = nullptr;
+  float* d_expected_cols = nullptr;
+  float* d_row_scales = nullptr;
+  float* d_col_scales = nullptr;
+  int* d_bad_tiles = nullptr; // 检测到异常的 Tile 数
+  int* d_corrected_tiles = nullptr; // 完成纠正的 Tile 数
   CUDA_CHECK(cudaMalloc(&d_a, a_count * sizeof(Element)));
   CUDA_CHECK(cudaMalloc(&d_b, b_count * sizeof(Element)));
   CUDA_CHECK(cudaMalloc(&d_c, c_count * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_expected_rows, tile_count * kTile * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_expected_cols, tile_count * kTile * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_row_scales, tile_count * kTile * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_col_scales, tile_count * kTile * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_bad_tiles, sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_corrected_tiles, sizeof(int)));
 
@@ -294,20 +331,31 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaDeviceSynchronize());
 
   dim3 block(kTile, kTile);
+  dim3 prepare_block(threads);
   dim3 grid(tile_cols, tile_rows);
   cudaStream_t stream;
-  cudaEvent_t gemm_start, gemm_stop, total_start, total_stop;
+  cudaEvent_t metadata_start, metadata_stop, gemm_start, gemm_stop, total_start, total_stop;
   CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+  CUDA_CHECK(cudaEventCreate(&metadata_start));
+  CUDA_CHECK(cudaEventCreate(&metadata_stop));
   CUDA_CHECK(cudaEventCreate(&gemm_start));
   CUDA_CHECK(cudaEventCreate(&gemm_stop));
   CUDA_CHECK(cudaEventCreate(&total_start));
   CUDA_CHECK(cudaEventCreate(&total_stop));
 
+  CUDA_CHECK(cudaEventRecord(metadata_start, stream));
+  prepare_expected_checksum_kernel<<<tile_count, prepare_block, 0, stream>>>(
+      d_a, d_b, d_expected_rows, d_expected_cols, d_row_scales, d_col_scales, options.m, options.n, options.k, tile_rows, tile_cols);
+  CUDA_CHECK(cudaEventRecord(metadata_stop, stream));
+  CUDA_CHECK(cudaEventSynchronize(metadata_stop));
+  float metadata_ms = 0.0f;
+  CUDA_CHECK(cudaEventElapsedTime(&metadata_ms, metadata_start, metadata_stop));
+
   auto enqueue_gemm = [&]() { native_tiled_fp8_gemm_kernel<<<grid, block, 0, stream>>>(d_a, d_b, d_c, options.m, options.n, options.k); };
   auto enqueue_abft = [&]() {
-    tile_abft_kernel<<<tile_count, block, 0, stream>>>(d_a, d_b, d_c, options.m, options.n, options.k, tile_rows, tile_cols,
-                                                       options.abs_tolerance, options.rel_tolerance, options.inject_fault, d_bad_tiles,
-                                                       d_corrected_tiles);
+    tile_abft_kernel<<<tile_count, block, 0, stream>>>(
+        d_c, d_expected_rows, d_expected_cols, d_row_scales, d_col_scales, options.m, options.n, tile_rows, tile_cols, options.abs_tolerance,
+        options.rel_tolerance, options.inject_fault, d_bad_tiles, d_corrected_tiles);
   };
 
   for (int i = 0; i < options.warmup; ++i) {
@@ -363,13 +411,17 @@ int main(int argc, char** argv) {
   std::printf("tile: %dx%d, shape: M=%d N=%d K=%d\n", kTile, kTile, options.m, options.n, options.k);
   std::printf("avg_gemm_time_ms: %.6f\n", average_gemm_ms);
   std::printf("avg_abft_time_ms: %.6f\n", average_abft_ms);
-  std::printf("avg_end_to_end_time_ms: %.6f\n", average_total_ms);
-  std::printf("end_to_end_tflops: %.6f\n", tflops);
+  std::printf("expected_prepare_time_ms: %.6f\n", metadata_ms);
+  std::printf("avg_steady_state_end_to_end_time_ms: %.6f\n", average_total_ms);
+  std::printf("steady_state_tflops: %.6f\n", tflops);
+  std::printf("first_call_approx_time_ms: %.6f\n", metadata_ms + average_total_ms);
   std::printf("sampled_max_error: %.6e\n", error);
   std::printf("bad_tiles: %d\n", bad_tiles);
   std::printf("corrected_tiles: %d\n", corrected_tiles);
   std::printf("verification: %s\n", verification ? "PASS" : "FAIL");
 
+  CUDA_CHECK(cudaEventDestroy(metadata_start));
+  CUDA_CHECK(cudaEventDestroy(metadata_stop));
   CUDA_CHECK(cudaEventDestroy(gemm_start));
   CUDA_CHECK(cudaEventDestroy(gemm_stop));
   CUDA_CHECK(cudaEventDestroy(total_start));
@@ -378,6 +430,10 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaFree(d_a));
   CUDA_CHECK(cudaFree(d_b));
   CUDA_CHECK(cudaFree(d_c));
+  CUDA_CHECK(cudaFree(d_expected_rows));
+  CUDA_CHECK(cudaFree(d_expected_cols));
+  CUDA_CHECK(cudaFree(d_row_scales));
+  CUDA_CHECK(cudaFree(d_col_scales));
   CUDA_CHECK(cudaFree(d_bad_tiles));
   CUDA_CHECK(cudaFree(d_corrected_tiles));
   return verification ? 0 : 1;

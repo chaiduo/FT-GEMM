@@ -33,28 +33,23 @@ using Accumulator = float;
 using TileM = cute::_64;
 using TileN = cute::_128;
 using TileK = cute::_32;
-using StageK = cute::_128;
-using MmaTileShape = cute::Shape<TileM, TileN, TileK>;
-using TmaTileShape = cute::Shape<TileM, TileN, StageK>;
-using GmmaOp =
-    decltype(cute::GMMA::ss_op_selector<Element, Element, Accumulator, MmaTileShape, cute::GMMA::Major::K, cute::GMMA::Major::K>());
+using TileShape = cute::Shape<TileM, TileN, TileK>;
+using GmmaOp = decltype(cute::GMMA::ss_op_selector<Element, Element, Accumulator, TileShape, cute::GMMA::Major::K, cute::GMMA::Major::K>());
 using TiledMma = decltype(cute::make_tiled_mma(GmmaOp{}));
-using SmemLayoutA = decltype(cute::tile_to_shape(cute::SM90::GMMA::Layout_K_INTER_Atom<Element>{}, cute::Shape<TileM, StageK>{}));
-using SmemLayoutB = decltype(cute::tile_to_shape(cute::SM90::GMMA::Layout_K_INTER_Atom<Element>{}, cute::Shape<TileN, StageK>{}));
+using SmemLayoutA = decltype(cute::tile_to_shape(cute::SM90::GMMA::Layout_K_INTER_Atom<Element>{}, cute::Shape<TileM, TileK>{}));
+using SmemLayoutB = decltype(cute::tile_to_shape(cute::SM90::GMMA::Layout_K_INTER_Atom<Element>{}, cute::Shape<TileN, TileK>{}));
 constexpr int kStages = 3;
 using SmemLayoutAStages =
-    decltype(cute::tile_to_shape(cute::SM90::GMMA::Layout_K_INTER_Atom<Element>{}, cute::Shape<TileM, StageK, cute::Int<kStages>>{},
+    decltype(cute::tile_to_shape(cute::SM90::GMMA::Layout_K_INTER_Atom<Element>{}, cute::Shape<TileM, TileK, cute::Int<kStages>>{},
                                  cute::Step<cute::_1, cute::_2, cute::_3>{}));
 using SmemLayoutBStages =
-    decltype(cute::tile_to_shape(cute::SM90::GMMA::Layout_K_INTER_Atom<Element>{}, cute::Shape<TileN, StageK, cute::Int<kStages>>{},
+    decltype(cute::tile_to_shape(cute::SM90::GMMA::Layout_K_INTER_Atom<Element>{}, cute::Shape<TileN, TileK, cute::Int<kStages>>{},
                                  cute::Step<cute::_1, cute::_2, cute::_3>{}));
-using ClusterShape = cute::Shape<cute::_1, cute::_2, cute::_1>;
+using ClusterShape = cute::Shape<cute::_1, cute::_1, cute::_1>;
 
 constexpr int kM = 64;
 constexpr int kN = 64;
 constexpr int kK = 32;
-constexpr int kStageK = 128;
-constexpr int kMmaPerStage = kStageK / kK;
 constexpr int kConsumerWarpgroups = 2;
 constexpr int kConsumerThreads = kConsumerWarpgroups * 128;
 constexpr int kProducerThreads = 32;
@@ -63,22 +58,14 @@ constexpr int kCtaM = kConsumerWarpgroups * kM;
 constexpr int kCtaN = 128;
 constexpr int kCStride = kM + 1;
 constexpr int kAbftSubtiles = (kCtaM / kM) * (kCtaN / kN);
-constexpr uint32_t kTmaTransactionBytes = (kCtaM * kStageK + kCtaN * kStageK) * sizeof(Element);
-
-struct InputSharedStorage {
-  alignas(128) Element a[kConsumerWarpgroups][cute::cosize_v<SmemLayoutAStages>];
-  alignas(128) Element b[cute::cosize_v<SmemLayoutBStages>];
-};
-
-union MainloopEpilogueStorage {
-  InputSharedStorage input;
-  alignas(128) float c[kConsumerWarpgroups][kCStride * kCtaN];
-};
+constexpr uint32_t kTmaTransactionBytes = (kCtaM * kK + kCtaN * kK) * sizeof(Element);
 
 struct PipelineSharedStorage {
   alignas(8) uint64_t tma_full_barrier[kStages];
   alignas(8) uint64_t tma_empty_barrier[kStages];
-  MainloopEpilogueStorage buffers;
+  alignas(128) Element a[kConsumerWarpgroups][cute::cosize_v<SmemLayoutAStages>];
+  alignas(128) Element b[cute::cosize_v<SmemLayoutBStages>];
+  alignas(128) float c[kConsumerWarpgroups][kCStride * kCtaN];
   float deltas[kAbftSubtiles][kM + kN];
   int bad_row_count[kAbftSubtiles];
   int bad_col_count[kAbftSubtiles];
@@ -97,10 +84,8 @@ struct Options {
   float verify_rel_tolerance = 1.0e-2f;
   float abft_abs_tolerance = 1.0e-2f;
   float abft_rel_tolerance = 2.0e-5f;
-  float fault_min_value = 1.0f;
-  float fault_max_value = 256.0f;
-  int fault_trials = 100;
-  int fault_seed = 12345;
+  float fault_value = 1.0f;
+  bool inject_fault = false;
 };
 
 static int div_up(int x, int y) { return (x + y - 1) / y; }
@@ -143,50 +128,36 @@ static Options parse_options(int argc, char** argv) {
   options.verify_rel_tolerance = get_float(argc, argv, "--verify-rel-tol", options.verify_rel_tolerance);
   options.abft_abs_tolerance = get_float(argc, argv, "--abs-tol", options.abft_abs_tolerance);
   options.abft_rel_tolerance = get_float(argc, argv, "--rel-tol", options.abft_rel_tolerance);
-  options.fault_min_value = get_float(argc, argv, "--fault-min-value", options.fault_min_value);
-  options.fault_max_value = get_float(argc, argv, "--fault-max-value", options.fault_max_value);
-  options.fault_trials = get_int(argc, argv, "--fault-trials", options.fault_trials);
-  options.fault_seed = get_int(argc, argv, "--fault-seed", options.fault_seed);
+  options.fault_value = get_float(argc, argv, "--fault-value", options.fault_value);
 
   for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--inject-fault") == 0) {
+      options.inject_fault = true;
+    }
     if (std::strcmp(argv[i], "--help") == 0) {
       std::printf(
           "Usage: %s [--m N --n N --k N --warmup N --repeat N]\n"
           "       [--verify-samples N --verify-abs-tol X "
           "--verify-rel-tol X]\n"
-          "       [--abs-tol X --rel-tol X]\n"
-          "       [--fault-min-value X --fault-max-value X]\n"
-          "       [--fault-trials N --fault-seed N]\n"
-          "Constraints: M %% 128 == 0, N %% 256 == 0, "
-          "and K %% 128 == 0.\n",
+          "       [--abs-tol X --rel-tol X --fault-value X "
+          "--inject-fault]\n"
+          "Constraints: M %% 128 == 0 and K %% 32 == 0; "
+          "N may have a boundary tile.\n",
           argv[0]);
       std::exit(EXIT_SUCCESS);
     }
   }
 
-  if (options.m <= 0 || options.n <= 0 || options.k <= 0 || options.m % kCtaM != 0 || options.n % (2 * kCtaN) != 0 ||
-      options.k % kStageK != 0 || options.warmup < 0 || options.repeat <= 0 || options.verify_samples < 0 ||
-      options.verify_abs_tolerance < 0.0f || options.verify_rel_tolerance < 0.0f || options.abft_abs_tolerance < 0.0f ||
-      options.abft_rel_tolerance < 0.0f || options.fault_min_value <= 0.0f || options.fault_max_value < options.fault_min_value ||
-      options.fault_trials <= 0) {
-    std::fprintf(stderr,
-                 "Invalid options. Require M%%128==0, N%%256==0, "
-                 "K%%128==0, and positive shape.\n");
+  if (options.m <= 0 || options.n <= 0 || options.k <= 0 || options.m % kCtaM != 0 || options.k % kK != 0 || options.warmup < 0 ||
+      options.repeat <= 0 || options.verify_samples < 0 || options.verify_abs_tolerance < 0.0f || options.verify_rel_tolerance < 0.0f ||
+      options.abft_abs_tolerance < 0.0f || options.abft_rel_tolerance < 0.0f || options.fault_value <= 0.0f) {
+    std::fprintf(stderr, "Invalid options. Require M%%128==0, K%%32==0, and positive shape.\n");
     std::exit(EXIT_FAILURE);
   }
   return options;
 }
 
 __device__ __forceinline__ uint32_t mix_u32(uint32_t x) {
-  x ^= x >> 16;
-  x *= 0x7feb352dU;
-  x ^= x >> 15;
-  x *= 0x846ca68bU;
-  x ^= x >> 16;
-  return x;
-}
-
-static uint32_t mix_host_u32(uint32_t x) {
   x ^= x >> 16;
   x *= 0x7feb352dU;
   x ^= x >> 15;
@@ -313,22 +284,22 @@ __device__ auto make_smem_tensor(Element* pointer, Layout layout) {
 }
 
 template <class TmaA, class TmaB>
-__global__ void __cluster_dims__(2, 1, 1)
-    wgmma_tma_k128_cluster_abft_kernel(CUTLASS_GRID_CONSTANT TmaA const tma_a, CUTLASS_GRID_CONSTANT TmaB const tma_b,
-                                       const float* expected_rows, const float* expected_cols, const float* row_scales,
-                                       const float* col_scales, float* c, int* bad_tiles, int* corrected_tiles, int m, int n, int k,
-                                       int micro_tile_rows, int micro_tile_cols, int cta_rows, int cta_cols, float abs_tolerance,
-                                       float rel_tolerance, float fault_value, int fault_tile, int fault_row, int fault_col,
-                                       bool inject_fault) {
+__global__ void __cluster_dims__(1, 1, 1)
+    wgmma_tma_wide_warpspecialized_abft_kernel(CUTLASS_GRID_CONSTANT TmaA const tma_a, CUTLASS_GRID_CONSTANT TmaB const tma_b,
+                                               const float* expected_rows, const float* expected_cols, const float* row_scales,
+                                               const float* col_scales, float* c, int* bad_tiles, int* corrected_tiles, int m, int n, int k,
+                                               int micro_tile_rows, int micro_tile_cols, int cta_rows, int cta_cols, float abs_tolerance,
+                                               float rel_tolerance, float fault_value, bool inject_fault) {
   extern __shared__ __align__(128) unsigned char shared_bytes[];
   PipelineSharedStorage& storage = *reinterpret_cast<PipelineSharedStorage*>(shared_bytes);
 
-  int cluster_rank = cute::block_rank_in_cluster();
-  int cluster_cols = cta_cols / 2;
-  int cluster_id = blockIdx.x / 2;
-  int cta_row = cluster_id / cluster_cols;
-  int cta_col = (cluster_id % cluster_cols) * 2 + cluster_rank;
-  int k_stage_count = k / kStageK;
+  int cta_id = blockIdx.x;
+  if (cta_id >= cta_rows * cta_cols) {
+    return;
+  }
+  int cta_row = cta_id / cta_cols;
+  int cta_col = cta_id % cta_cols;
+  int k_tile_count = k / kK;
   bool is_consumer = threadIdx.x < kConsumerThreads;
   bool is_producer = !is_consumer;
   bool is_producer_leader = threadIdx.x == kConsumerThreads;
@@ -337,14 +308,13 @@ __global__ void __cluster_dims__(2, 1, 1)
 #pragma unroll
     for (int stage = 0; stage < kStages; ++stage) {
       cutlass::arch::ClusterTransactionBarrier::init(&storage.tma_full_barrier[stage], 1);
-      cutlass::arch::ClusterBarrier::init(&storage.tma_empty_barrier[stage], kConsumerWarpgroups * 2);
+      cutlass::arch::ClusterBarrier::init(&storage.tma_empty_barrier[stage], kConsumerWarpgroups);
     }
     cutlass::arch::fence_barrier_init();
   }
-  cute::cluster_arrive_relaxed();
-  cute::cluster_wait();
+  __syncthreads();
   int producer_lane = threadIdx.x - kConsumerThreads;
-  if (is_producer && producer_lane < kConsumerWarpgroups * 2) {
+  if (is_producer && producer_lane < kConsumerWarpgroups) {
 #pragma unroll
     for (int stage = 0; stage < kStages; ++stage) {
       cutlass::arch::ClusterBarrier::arrive(&storage.tma_empty_barrier[stage]);
@@ -357,17 +327,17 @@ __global__ void __cluster_dims__(2, 1, 1)
   __syncthreads();
 
   if (is_producer) {
-    auto sA0 = cute::make_tensor(cute::make_smem_ptr(storage.buffers.input.a[0]), SmemLayoutAStages{});
-    auto sA1 = cute::make_tensor(cute::make_smem_ptr(storage.buffers.input.a[1]), SmemLayoutAStages{});
-    auto sB = cute::make_tensor(cute::make_smem_ptr(storage.buffers.input.b), SmemLayoutBStages{});
+    auto sA0 = cute::make_tensor(cute::make_smem_ptr(storage.a[0]), SmemLayoutAStages{});
+    auto sA1 = cute::make_tensor(cute::make_smem_ptr(storage.a[1]), SmemLayoutAStages{});
+    auto sB = cute::make_tensor(cute::make_smem_ptr(storage.b), SmemLayoutBStages{});
     auto mA = tma_a.get_tma_tensor(cute::make_shape(m, k, cute::_1{}));
     auto mB = tma_b.get_tma_tensor(cute::make_shape(n, k, cute::_1{}));
-    auto gA = cute::local_tile(mA, TmaTileShape{}, cute::make_coord(cute::_, cute::_, cute::_), cute::Step<cute::_1, cute::X, cute::_1>{});
-    auto gB = cute::local_tile(mB, TmaTileShape{}, cute::make_coord(cute::_, cute::_, cute::_), cute::Step<cute::X, cute::_1, cute::_1>{});
+    auto gA = cute::local_tile(mA, TileShape{}, cute::make_coord(cute::_, cute::_, cute::_), cute::Step<cute::_1, cute::X, cute::_1>{});
+    auto gB = cute::local_tile(mB, TileShape{}, cute::make_coord(cute::_, cute::_, cute::_), cute::Step<cute::X, cute::_1, cute::_1>{});
     auto gA0 = gA(cute::_, cute::_, cta_row * kConsumerWarpgroups, cute::_, cute::Int<0>{});
     auto gA1 = gA(cute::_, cute::_, cta_row * kConsumerWarpgroups + 1, cute::_, cute::Int<0>{});
     auto gB_tile = gB(cute::_, cute::_, cta_col, cute::_, cute::Int<0>{});
-    auto block_tma_a = tma_a.get_slice(cluster_rank);
+    auto block_tma_a = tma_a.get_slice(0);
     auto block_tma_b = tma_b.get_slice(0);
     auto tAgA0 = block_tma_a.partition_S(gA0);
     auto tAgA1 = block_tma_a.partition_S(gA1);
@@ -377,67 +347,59 @@ __global__ void __cluster_dims__(2, 1, 1)
     auto tBsB = block_tma_b.partition_D(sB);
 
     if (is_producer_leader) {
-      constexpr uint16_t a_multicast_mask = 0x3;
-      for (int k_stage = 0; k_stage < k_stage_count; ++k_stage) {
-        int stage = k_stage % kStages;
-        uint32_t phase = (k_stage / kStages) & 1;
+      for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
+        int stage = k_tile % kStages;
+        uint32_t phase = (k_tile / kStages) & 1;
         cutlass::arch::ClusterBarrier::wait(&storage.tma_empty_barrier[stage], phase);
         cutlass::arch::ClusterTransactionBarrier::arrive_and_expect_tx(&storage.tma_full_barrier[stage], kTmaTransactionBytes);
-        cute::copy(tma_a.with(storage.tma_full_barrier[stage], a_multicast_mask), tAgA0(cute::_, cute::_, cute::_, k_stage),
+        cute::copy(tma_a.with(storage.tma_full_barrier[stage]), tAgA0(cute::_, cute::_, cute::_, k_tile),
                    tAsA0(cute::_, cute::_, cute::_, stage));
-        cute::copy(tma_a.with(storage.tma_full_barrier[stage], a_multicast_mask), tAgA1(cute::_, cute::_, cute::_, k_stage),
+        cute::copy(tma_a.with(storage.tma_full_barrier[stage]), tAgA1(cute::_, cute::_, cute::_, k_tile),
                    tAsA1(cute::_, cute::_, cute::_, stage));
-        cute::copy(tma_b.with(storage.tma_full_barrier[stage]), tBgB(cute::_, cute::_, cute::_, k_stage),
+        cute::copy(tma_b.with(storage.tma_full_barrier[stage]), tBgB(cute::_, cute::_, cute::_, k_tile),
                    tBsB(cute::_, cute::_, cute::_, stage));
       }
     }
-    cutlass::arch::NamedBarrier::sync(kThreads, 2);
   } else {
     int consumer_group = threadIdx.x / 128;
     int consumer_thread = threadIdx.x % 128;
-    auto sA = cute::make_tensor(cute::make_smem_ptr(storage.buffers.input.a[consumer_group]), SmemLayoutAStages{});
-    auto sB = cute::make_tensor(cute::make_smem_ptr(storage.buffers.input.b), SmemLayoutBStages{});
+    auto sA = cute::make_tensor(cute::make_smem_ptr(storage.a[consumer_group]), SmemLayoutAStages{});
+    auto sB = cute::make_tensor(cute::make_smem_ptr(storage.b), SmemLayoutBStages{});
     TiledMma tiled_mma;
     auto thread_mma = tiled_mma.get_slice(consumer_thread);
     auto accum = cute::partition_fragment_C(tiled_mma, cute::make_shape(cute::Int<kM>{}, cute::Int<kCtaN>{}));
     cute::clear(accum);
 
-    for (int k_stage = 0; k_stage < k_stage_count; ++k_stage) {
-      int stage = k_stage % kStages;
-      uint32_t phase = (k_stage / kStages) & 1;
+    for (int k_tile = 0; k_tile < k_tile_count; ++k_tile) {
+      int stage = k_tile % kStages;
+      uint32_t phase = (k_tile / kStages) & 1;
       cutlass::arch::ClusterTransactionBarrier::wait(&storage.tma_full_barrier[stage], phase);
 
       auto sA_stage = sA(cute::_, cute::_, stage);
       auto sB_stage = sB(cute::_, cute::_, stage);
+      auto tCsA = thread_mma.partition_A(sA_stage);
+      auto tCsB = thread_mma.partition_B(sB_stage);
+      auto tCrA = thread_mma.make_fragment_A(tCsA);
+      auto tCrB = thread_mma.make_fragment_B(tCsB);
+      cute::copy(tCsA, tCrA);
+      cute::copy(tCsB, tCrB);
+
+      tiled_mma.accumulate_ = k_tile == 0 ? cute::GMMA::ScaleOut::Zero : cute::GMMA::ScaleOut::One;
       cute::warpgroup_fence_operand(accum);
       cute::warpgroup_arrive();
-#pragma unroll
-      for (int k_subtile = 0; k_subtile < kMmaPerStage; ++k_subtile) {
-        auto sA_subtile = cute::local_tile(sA_stage, cute::Shape<TileM, TileK>{}, cute::make_coord(0, k_subtile));
-        auto sB_subtile = cute::local_tile(sB_stage, cute::Shape<TileN, TileK>{}, cute::make_coord(0, k_subtile));
-        auto tCsA = thread_mma.partition_A(sA_subtile);
-        auto tCsB = thread_mma.partition_B(sB_subtile);
-        auto tCrA = thread_mma.make_fragment_A(tCsA);
-        auto tCrB = thread_mma.make_fragment_B(tCsB);
-        cute::copy(tCsA, tCrA);
-        cute::copy(tCsB, tCrB);
-        tiled_mma.accumulate_ = (k_stage == 0 && k_subtile == 0) ? cute::GMMA::ScaleOut::Zero : cute::GMMA::ScaleOut::One;
-        cute::gemm(tiled_mma, tCrA, tCrB, accum);
-      }
+      cute::gemm(tiled_mma, tCrA, tCrB, accum);
       cute::warpgroup_commit_batch();
       cute::warpgroup_wait<0>();
       cute::warpgroup_fence_operand(accum);
 
       cutlass::arch::NamedBarrier::sync(128, consumer_group);
       if (consumer_thread == 0) {
-        cutlass::arch::ClusterBarrier::arrive(&storage.tma_empty_barrier[stage], 0, 1);
-        cutlass::arch::ClusterBarrier::arrive(&storage.tma_empty_barrier[stage], 1, 1);
+        cutlass::arch::ClusterBarrier::arrive(&storage.tma_empty_barrier[stage]);
       }
     }
-    cutlass::arch::NamedBarrier::sync(kThreads, 2);
     using CLayout = decltype(cute::make_layout(cute::make_shape(cute::Int<kM>{}, cute::Int<kCtaN>{}),
                                                cute::make_stride(cute::Int<1>{}, cute::Int<kCStride>{})));
-    auto sC = cute::make_tensor(cute::make_smem_ptr(storage.buffers.c[consumer_group]), CLayout{});
+    auto sC = cute::make_tensor(cute::make_smem_ptr(storage.c[consumer_group]), CLayout{});
     auto tCsC = thread_mma.partition_C(sC);
     cute::copy(accum, tCsC);
     cutlass::arch::NamedBarrier::sync(128, consumer_group);
@@ -447,6 +409,7 @@ __global__ void __cluster_dims__(2, 1, 1)
   if (threadIdx.x < kAbftSubtiles * 32) {
     int subtile = threadIdx.x / 32;
     int lane = threadIdx.x % 32;
+    int micro_tile_count = micro_tile_rows * micro_tile_cols;
     int col_groups = kCtaN / kN;
     int row_group = subtile / col_groups;
     int col_group = subtile % col_groups;
@@ -461,10 +424,10 @@ __global__ void __cluster_dims__(2, 1, 1)
         storage.bad_col_count[subtile] = 0;
         storage.bad_row[subtile] = -1;
         storage.bad_col[subtile] = -1;
-        if (inject_fault && micro_tile_id == fault_tile) {
-          int row = min(fault_row, kM - 1);
-          int col = min(fault_col, valid_cols - 1);
-          storage.buffers.c[row_group][(col_group * kN + col) * kCStride + row] += fault_value;
+        if (inject_fault && micro_tile_id == micro_tile_count / 2) {
+          int row = kM / 2;
+          int col = min(kN / 2, valid_cols - 1);
+          storage.c[row_group][(col_group * kN + col) * kCStride + row] += fault_value;
         }
       }
       __syncwarp();
@@ -474,7 +437,7 @@ __global__ void __cluster_dims__(2, 1, 1)
 #pragma unroll
         for (int col = 0; col < kN; ++col) {
           if (col < valid_cols) {
-            row_actual += storage.buffers.c[row_group][(col_group * kN + col) * kCStride + checksum_index];
+            row_actual += storage.c[row_group][(col_group * kN + col) * kCStride + checksum_index];
           }
         }
         float row_delta = expected_rows[micro_tile_id * kM + checksum_index] - row_actual;
@@ -489,7 +452,7 @@ __global__ void __cluster_dims__(2, 1, 1)
           float col_actual = 0.0f;
 #pragma unroll
           for (int row = 0; row < kM; ++row) {
-            col_actual += storage.buffers.c[row_group][(col_group * kN + checksum_index) * kCStride + row];
+            col_actual += storage.c[row_group][(col_group * kN + checksum_index) * kCStride + row];
           }
           col_delta = expected_cols[micro_tile_id * kN + checksum_index] - col_actual;
           if (fabsf(col_delta) > abs_tolerance + rel_tolerance * fmaxf(1.0f, col_scales[micro_tile_id * kN + checksum_index])) {
@@ -508,7 +471,7 @@ __global__ void __cluster_dims__(2, 1, 1)
         if (storage.bad_row_count[subtile] == 1 && storage.bad_col_count[subtile] == 1) {
           int row = storage.bad_row[subtile];
           int col = storage.bad_col[subtile];
-          storage.buffers.c[row_group][(col_group * kN + col) * kCStride + row] +=
+          storage.c[row_group][(col_group * kN + col) * kCStride + row] +=
               0.5f * (storage.deltas[subtile][row] + storage.deltas[subtile][kM + col]);
           atomicAdd(corrected_tiles, 1);
         }
@@ -526,11 +489,9 @@ __global__ void __cluster_dims__(2, 1, 1)
     if (global_row < m && global_col < n) {
       int row_group = row / kM;
       int local_row = row % kM;
-      c[global_col * m + global_row] = storage.buffers.c[row_group][col * kCStride + local_row];
+      c[global_col * m + global_row] = storage.c[row_group][col * kCStride + local_row];
     }
   }
-  cute::cluster_arrive();
-  cute::cluster_wait();
 }
 
 struct VerificationResult {
@@ -581,7 +542,6 @@ int main(int argc, char** argv) {
   int cta_rows = options.m / kCtaM;
   int cta_cols = div_up(options.n, kCtaN);
   int cta_count = cta_rows * cta_cols;
-  int cluster_count = cta_rows * (cta_cols / 2);
 
   Element* d_a = nullptr;
   Element* d_b = nullptr;
@@ -626,10 +586,10 @@ int main(int argc, char** argv) {
       d_a, cute::make_layout(cute::make_shape(options.m, options.k, cute::_1{}), cute::make_stride(options.k, cute::_1{}, cute::_0{})));
   auto tensor_b = cute::make_tensor(
       d_b, cute::make_layout(cute::make_shape(options.n, options.k, cute::_1{}), cute::make_stride(options.k, cute::_1{}, cute::_0{})));
-  auto tma_a = cute::make_tma_copy_A_sm90(cute::SM90_TMA_LOAD_MULTICAST{}, tensor_a, SmemLayoutAStages{}(cute::_, cute::_, cute::Int<0>{}),
-                                          TmaTileShape{}, ClusterShape{});
+  auto tma_a = cute::make_tma_copy_A_sm90(cute::SM90_TMA_LOAD{}, tensor_a, SmemLayoutAStages{}(cute::_, cute::_, cute::Int<0>{}),
+                                          TileShape{}, ClusterShape{});
   auto tma_b = cute::make_tma_copy_B_sm90(cute::SM90_TMA_LOAD{}, tensor_b, SmemLayoutBStages{}(cute::_, cute::_, cute::Int<0>{}),
-                                          TmaTileShape{}, ClusterShape{});
+                                          TileShape{}, ClusterShape{});
 
   cudaStream_t stream;
   cudaEvent_t start;
@@ -637,7 +597,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
   CUDA_CHECK(cudaEventCreate(&start));
   CUDA_CHECK(cudaEventCreate(&stop));
-  auto kernel = wgmma_tma_k128_cluster_abft_kernel<decltype(tma_a), decltype(tma_b)>;
+  auto kernel = wgmma_tma_wide_warpspecialized_abft_kernel<decltype(tma_a), decltype(tma_b)>;
   CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed, 1));
   CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, sizeof(PipelineSharedStorage)));
 
@@ -669,14 +629,14 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaEventElapsedTime(&expected_metadata_ms, start, stop));
   float metadata_prepare_ms = input_metadata_ms + expected_metadata_ms;
 
-  auto enqueue_gemm = [&](bool inject_fault, int fault_tile, int fault_row, int fault_col, float fault_value) {
+  auto enqueue_gemm = [&]() {
     cudaLaunchAttribute attribute{};
     attribute.id = cudaLaunchAttributeClusterDimension;
-    attribute.val.clusterDim.x = 2;
+    attribute.val.clusterDim.x = 1;
     attribute.val.clusterDim.y = 1;
     attribute.val.clusterDim.z = 1;
     cudaLaunchConfig_t config{};
-    config.gridDim = dim3(cluster_count * 2, 1, 1);
+    config.gridDim = dim3(cta_count, 1, 1);
     config.blockDim = dim3(kThreads, 1, 1);
     config.dynamicSmemBytes = sizeof(PipelineSharedStorage);
     config.stream = stream;
@@ -684,14 +644,13 @@ int main(int argc, char** argv) {
     config.numAttrs = 1;
     CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, tma_a, tma_b, d_expected_rows, d_expected_cols, d_row_scales, d_col_scales, d_c,
                                   d_bad_tiles, d_corrected_tiles, options.m, options.n, options.k, tile_rows, tile_cols, cta_rows, cta_cols,
-                                  options.abft_abs_tolerance, options.abft_rel_tolerance, fault_value, fault_tile, fault_row, fault_col,
-                                  inject_fault));
+                                  options.abft_abs_tolerance, options.abft_rel_tolerance, options.fault_value, options.inject_fault));
   };
 
   CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
   CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
   CUDA_CHECK(cudaEventRecord(start, stream));
-  enqueue_gemm(false, 0, 0, 0, 0.0f);
+  enqueue_gemm();
   CUDA_CHECK(cudaEventRecord(stop, stream));
   CUDA_CHECK(cudaEventSynchronize(stop));
   float first_gemm_abft_ms = 0.0f;
@@ -700,7 +659,7 @@ int main(int argc, char** argv) {
   for (int i = 0; i < options.warmup; ++i) {
     CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
     CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
-    enqueue_gemm(false, 0, 0, 0, 0.0f);
+    enqueue_gemm();
   }
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -709,7 +668,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
     CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
     CUDA_CHECK(cudaEventRecord(start, stream));
-    enqueue_gemm(false, 0, 0, 0, 0.0f);
+    enqueue_gemm();
     CUDA_CHECK(cudaEventRecord(stop, stream));
     CUDA_CHECK(cudaEventSynchronize(stop));
     float iteration_ms = 0.0f;
@@ -729,85 +688,6 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(&bad_tiles, d_bad_tiles, sizeof(int), cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(&corrected_tiles, d_corrected_tiles, sizeof(int), cudaMemcpyDeviceToHost));
 
-  int campaign_detected = 0;
-  int campaign_correction_attempts = 0;
-  int campaign_corrected = 0;
-  int campaign_missed = 0;
-  int campaign_detected_not_corrected = 0;
-  int campaign_miscorrected = 0;
-  float campaign_max_residual = 0.0f;
-  constexpr int kMagnitudeBins = 4;
-  int campaign_bin_trials[kMagnitudeBins] = {};
-  int campaign_bin_detected[kMagnitudeBins] = {};
-  int campaign_bin_corrected[kMagnitudeBins] = {};
-  struct FaultFailure {
-    int trial;
-    int row;
-    int col;
-    float fault;
-    int bad_tiles;
-    int corrected_tiles;
-    float residual;
-    float tolerance;
-  };
-  std::vector<FaultFailure> campaign_failures;
-  uint32_t campaign_state = static_cast<uint32_t>(options.fault_seed);
-  for (int trial = 0; trial < options.fault_trials; ++trial) {
-    campaign_state = mix_host_u32(campaign_state + 0x9e3779b9U + static_cast<uint32_t>(trial));
-    int fault_tile = static_cast<int>(campaign_state % static_cast<uint32_t>(tile_count));
-    campaign_state = mix_host_u32(campaign_state);
-    int fault_row = static_cast<int>(campaign_state % kM);
-    campaign_state = mix_host_u32(campaign_state);
-    int fault_col = static_cast<int>(campaign_state % kN);
-    campaign_state = mix_host_u32(campaign_state);
-    float magnitude_unit = static_cast<float>(campaign_state & 0x00ffffffU) / 16777215.0f;
-    float fault_magnitude = options.fault_min_value + (options.fault_max_value - options.fault_min_value) * magnitude_unit;
-    int magnitude_bin = options.fault_max_value == options.fault_min_value
-                            ? 0
-                            : std::min(kMagnitudeBins - 1, static_cast<int>(kMagnitudeBins * magnitude_unit));
-    campaign_state = mix_host_u32(campaign_state);
-    float signed_fault_value = (campaign_state & 1U) == 0 ? fault_magnitude : -fault_magnitude;
-
-    CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
-    CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
-    enqueue_gemm(true, fault_tile, fault_row, fault_col, signed_fault_value);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-
-    int trial_bad_tiles = 0;
-    int trial_corrected_tiles = 0;
-    CUDA_CHECK(cudaMemcpy(&trial_bad_tiles, d_bad_tiles, sizeof(int), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(&trial_corrected_tiles, d_corrected_tiles, sizeof(int), cudaMemcpyDeviceToHost));
-
-    int fault_micro_row = fault_tile / tile_cols;
-    int fault_micro_col = fault_tile % tile_cols;
-    int fault_global_row = fault_micro_row * kM + fault_row;
-    int fault_global_col = fault_micro_col * kN + fault_col;
-    size_t fault_output_index = static_cast<size_t>(fault_global_col) * options.m + fault_global_row;
-    float corrected_value = 0.0f;
-    CUDA_CHECK(cudaMemcpy(&corrected_value, d_c + fault_output_index, sizeof(float), cudaMemcpyDeviceToHost));
-    float reference_value = h_c[fault_output_index];
-    float residual = fabsf(corrected_value - reference_value);
-    float recovery_tolerance = options.verify_abs_tolerance + options.verify_rel_tolerance * fmaxf(1.0f, fabsf(reference_value));
-    bool detected = trial_bad_tiles > 0;
-    bool attempted = trial_corrected_tiles > 0;
-    bool recovered = trial_bad_tiles == 1 && trial_corrected_tiles == 1 && residual <= recovery_tolerance;
-
-    campaign_detected += detected;
-    campaign_correction_attempts += attempted;
-    campaign_corrected += recovered;
-    campaign_missed += !detected;
-    campaign_detected_not_corrected += detected && !attempted;
-    campaign_miscorrected += attempted && !recovered;
-    campaign_max_residual = fmaxf(campaign_max_residual, residual);
-    ++campaign_bin_trials[magnitude_bin];
-    campaign_bin_detected[magnitude_bin] += detected;
-    campaign_bin_corrected[magnitude_bin] += recovered;
-    if (!recovered && campaign_failures.size() < 16) {
-      campaign_failures.push_back({trial, fault_global_row, fault_global_col, signed_fault_value, trial_bad_tiles, trial_corrected_tiles,
-                                   residual, recovery_tolerance});
-    }
-  }
-
   float average_ms = total_ms / options.repeat;
   float first_call_total_ms = metadata_prepare_ms + first_gemm_abft_ms;
   float amortized_ms = average_ms + metadata_prepare_ms / options.repeat;
@@ -817,15 +697,12 @@ int main(int argc, char** argv) {
   double amortized_tflops = operations / (amortized_ms * 1.0e9);
   VerificationResult verification = verify_samples(h_a, h_b, h_c, options);
   bool numerical_pass = options.verify_samples == 0 || verification.max_tolerance_ratio <= 1.0f;
-  bool abft_pass = bad_tiles == 0;
+  bool abft_pass = options.inject_fault ? bad_tiles == 1 && corrected_tiles == 1 : bad_tiles == 0;
   bool passed = numerical_pass && abft_pass;
 
   size_t metadata_bytes = (2 * (a_metadata_count + b_metadata_count) + 2 * (row_metadata_count + col_metadata_count)) * sizeof(float);
-  std::printf("program: S7 random single-fault correction campaign\n");
-  std::printf(
-      "instruction_tile: 64x128x32, cta_tile: %dx%dx%d, "
-      "tma_stage_k: %d, stages: %d\n",
-      kCtaM, kCtaN, kK, kStageK, kStages);
+  std::printf("version: S3 128x128 warp-specialized TMA-WGMMA ABFT\n");
+  std::printf("instruction_tile: 64x128x32, cta_tile: %dx%dx%d, stages: %d\n", kCtaM, kCtaN, kK, kStages);
   std::printf(
       "threads_per_cta: %d, consumer_warpgroups: %d, "
       "producer_threads: %d, verifier_warps: %d\n",
@@ -839,7 +716,6 @@ int main(int argc, char** argv) {
       "layout: A=[M,K] row-major, B=[N,K] column-major, "
       "C=[N,M] column-major\n");
   std::printf("shape: M=%d N=%d K=%d, abft_tiles=%d, cta_tiles=%d\n", options.m, options.n, options.k, tile_count, cta_count);
-  std::printf("cluster_shape: 2x1x1, clusters: %d\n", cluster_count);
   std::printf("shared_c_stride: %d, active_blocks_per_sm: %d\n", kCStride, active_blocks_per_sm);
   std::printf("metadata_cache_bytes: %zu\n", metadata_bytes);
   std::printf("input_metadata_time_ms: %.6f\n", input_metadata_ms);
@@ -855,44 +731,6 @@ int main(int argc, char** argv) {
   std::printf("abft_tolerance: abs=%.6e rel=%.6e\n", options.abft_abs_tolerance, options.abft_rel_tolerance);
   std::printf("bad_tiles: %d\n", bad_tiles);
   std::printf("corrected_tiles: %d\n", corrected_tiles);
-  if (options.fault_trials > 0) {
-    double detection_rate = 100.0 * campaign_detected / options.fault_trials;
-    double correction_rate = 100.0 * campaign_corrected / options.fault_trials;
-    int failed_trials = options.fault_trials - campaign_corrected;
-    std::printf("fault_campaign_trials: %d\n", options.fault_trials);
-    std::printf("fault_campaign_seed: %d\n", options.fault_seed);
-    std::printf("fault_campaign_magnitude_distribution: uniform [%.6e, %.6e], random sign\n", options.fault_min_value,
-                options.fault_max_value);
-    std::printf("fault_campaign_detected: %d\n", campaign_detected);
-    std::printf("fault_campaign_correction_attempts: %d\n", campaign_correction_attempts);
-    std::printf("fault_campaign_corrected: %d\n", campaign_corrected);
-    std::printf("fault_campaign_missed: %d\n", campaign_missed);
-    std::printf("fault_campaign_detected_not_corrected: %d\n", campaign_detected_not_corrected);
-    std::printf("fault_campaign_miscorrected: %d\n", campaign_miscorrected);
-    std::printf("fault_campaign_detection_rate_percent: %.3f\n", detection_rate);
-    std::printf("fault_campaign_correction_rate_percent: %.3f\n", correction_rate);
-    std::printf("fault_campaign_max_post_correction_residual: %.6e\n", campaign_max_residual);
-    float bin_width = (options.fault_max_value - options.fault_min_value) / kMagnitudeBins;
-    for (int bin = 0; bin < kMagnitudeBins; ++bin) {
-      float lower = options.fault_min_value + bin * bin_width;
-      float upper = bin == kMagnitudeBins - 1 ? options.fault_max_value : lower + bin_width;
-      double bin_detection_rate = campaign_bin_trials[bin] == 0 ? 0.0 : 100.0 * campaign_bin_detected[bin] / campaign_bin_trials[bin];
-      double bin_correction_rate = campaign_bin_trials[bin] == 0 ? 0.0 : 100.0 * campaign_bin_corrected[bin] / campaign_bin_trials[bin];
-      std::printf(
-          "fault_campaign_bin_%d: range=[%.6e, %.6e%s trials=%d detected=%d corrected=%d detection_rate=%.3f correction_rate=%.3f\n", bin,
-          lower, upper, bin == kMagnitudeBins - 1 ? "]" : ")", campaign_bin_trials[bin], campaign_bin_detected[bin],
-          campaign_bin_corrected[bin], bin_detection_rate, bin_correction_rate);
-    }
-    for (const FaultFailure& failure : campaign_failures) {
-      std::printf(
-          "fault_campaign_failure: trial=%d row=%d col=%d fault=%+.6e bad_tiles=%d corrected_tiles=%d residual=%.6e tolerance=%.6e\n",
-          failure.trial, failure.row, failure.col, failure.fault, failure.bad_tiles, failure.corrected_tiles, failure.residual,
-          failure.tolerance);
-    }
-    if (failed_trials > static_cast<int>(campaign_failures.size())) {
-      std::printf("fault_campaign_failure_records_truncated: %d\n", failed_trials - static_cast<int>(campaign_failures.size()));
-    }
-  }
   std::printf("verification_samples: %d\n", verification.checked);
   std::printf("sampled_max_absolute_error: %.6e\n", verification.max_absolute_error);
   std::printf("sampled_max_tolerance_ratio: %.6e\n", verification.max_tolerance_ratio);

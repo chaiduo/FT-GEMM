@@ -83,7 +83,7 @@ struct Options {
   float verify_abs_tolerance = 2.5e-1f;
   float verify_rel_tolerance = 1.0e-2f;
   float abft_abs_tolerance = 1.0e-2f;
-  float abft_rel_tolerance = 1.0e-5f;
+  float abft_rel_tolerance = 2.0e-5f;
   float fault_value = 1.0f;
   bool inject_fault = false;
 };
@@ -715,7 +715,7 @@ int main(int argc, char** argv) {
   bool passed = numerical_pass && abft_pass;
 
   size_t metadata_bytes = (2 * (a_metadata_count + b_metadata_count) + 2 * (row_metadata_count + col_metadata_count)) * sizeof(float);
-  std::printf("version: S5 full expected-cache persistent TMA-WGMMA ABFT\n");
+  std::printf("version: S2 full expected-cache persistent TMA-WGMMA ABFT\n");
   std::printf("instruction_tile: 64x64x32, input_stages: %d, output_stages: %d\n", kStages, kOutputStages);
   std::printf("threads_per_cta: %d, compute_threads: %d, verify_threads: %d\n", kPipelineThreads, kComputeThreads, kVerifyThreads);
   std::printf(

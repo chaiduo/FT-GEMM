@@ -97,8 +97,10 @@ struct Options {
   float verify_rel_tolerance = 1.0e-2f;
   float abft_abs_tolerance = 1.0e-2f;
   float abft_rel_tolerance = 2.0e-5f;
-  float fault_value = 1.0f;
-  bool inject_fault = false;
+  float fault_min_value = 1.0f;
+  float fault_max_value = 256.0f;
+  int fault_trials = 100;
+  int fault_seed = 12345;
 };
 
 static int div_up(int x, int y) { return (x + y - 1) / y; }
@@ -141,18 +143,20 @@ static Options parse_options(int argc, char** argv) {
   options.verify_rel_tolerance = get_float(argc, argv, "--verify-rel-tol", options.verify_rel_tolerance);
   options.abft_abs_tolerance = get_float(argc, argv, "--abs-tol", options.abft_abs_tolerance);
   options.abft_rel_tolerance = get_float(argc, argv, "--rel-tol", options.abft_rel_tolerance);
-  options.fault_value = get_float(argc, argv, "--fault-value", options.fault_value);
+  options.fault_min_value = get_float(argc, argv, "--fault-min-value", options.fault_min_value);
+  options.fault_max_value = get_float(argc, argv, "--fault-max-value", options.fault_max_value);
+  options.fault_trials = get_int(argc, argv, "--fault-trials", options.fault_trials);
+  options.fault_seed = get_int(argc, argv, "--fault-seed", options.fault_seed);
 
   for (int i = 1; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--inject-fault") == 0) {
-      options.inject_fault = true;
-    }
     if (std::strcmp(argv[i], "--help") == 0) {
       std::printf(
           "Usage: %s [--m N --n N --k N --warmup N --repeat N]\n"
           "       [--verify-samples N --verify-abs-tol X "
           "--verify-rel-tol X]\n"
-          "       [--abs-tol X --rel-tol X --fault-value X --inject-fault]\n"
+          "       [--abs-tol X --rel-tol X]\n"
+          "       [--fault-min-value X --fault-max-value X]\n"
+          "       [--fault-trials N --fault-seed N]\n"
           "Constraints: M %% 128 == 0, N %% 256 == 0, "
           "and K %% 128 == 0.\n",
           argv[0]);
@@ -163,7 +167,8 @@ static Options parse_options(int argc, char** argv) {
   if (options.m <= 0 || options.n <= 0 || options.k <= 0 || options.m % kCtaM != 0 || options.n % (2 * kCtaN) != 0 ||
       options.k % kStageK != 0 || options.warmup < 0 || options.repeat <= 0 || options.verify_samples < 0 ||
       options.verify_abs_tolerance < 0.0f || options.verify_rel_tolerance < 0.0f || options.abft_abs_tolerance < 0.0f ||
-      options.abft_rel_tolerance < 0.0f || options.fault_value <= 0.0f) {
+      options.abft_rel_tolerance < 0.0f || options.fault_min_value <= 0.0f || options.fault_max_value < options.fault_min_value ||
+      options.fault_trials <= 0) {
     std::fprintf(stderr,
                  "Invalid options. Require M%%128==0, N%%256==0, "
                  "K%%128==0, and positive shape.\n");
@@ -173,6 +178,15 @@ static Options parse_options(int argc, char** argv) {
 }
 
 __device__ __forceinline__ uint32_t mix_u32(uint32_t x) {
+  x ^= x >> 16;
+  x *= 0x7feb352dU;
+  x ^= x >> 15;
+  x *= 0x846ca68bU;
+  x ^= x >> 16;
+  return x;
+}
+
+static uint32_t mix_host_u32(uint32_t x) {
   x ^= x >> 16;
   x *= 0x7feb352dU;
   x ^= x >> 15;
@@ -304,7 +318,8 @@ __global__ void __cluster_dims__(2, 1, 1)
                                        const float* expected_rows, const float* expected_cols, const float* row_scales,
                                        const float* col_scales, float* c, int* bad_tiles, int* corrected_tiles, int m, int n, int k,
                                        int micro_tile_rows, int micro_tile_cols, int cta_rows, int cta_cols, float abs_tolerance,
-                                       float rel_tolerance, float fault_value, bool inject_fault) {
+                                       float rel_tolerance, float fault_value, int fault_tile, int fault_row, int fault_col,
+                                       bool inject_fault) {
   extern __shared__ __align__(128) unsigned char shared_bytes[];
   PipelineSharedStorage& storage = *reinterpret_cast<PipelineSharedStorage*>(shared_bytes);
 
@@ -446,9 +461,9 @@ __global__ void __cluster_dims__(2, 1, 1)
         storage.bad_col_count[subtile] = 0;
         storage.bad_row[subtile] = -1;
         storage.bad_col[subtile] = -1;
-        if (inject_fault && micro_tile_id == micro_tile_rows * micro_tile_cols / 2) {
-          int row = kM / 2;
-          int col = min(kN / 2, valid_cols - 1);
+        if (inject_fault && micro_tile_id == fault_tile) {
+          int row = min(fault_row, kM - 1);
+          int col = min(fault_col, valid_cols - 1);
           storage.buffers.c[row_group][(col_group * kN + col) * kCStride + row] += fault_value;
         }
       }
@@ -654,7 +669,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaEventElapsedTime(&expected_metadata_ms, start, stop));
   float metadata_prepare_ms = input_metadata_ms + expected_metadata_ms;
 
-  auto enqueue_gemm = [&]() {
+  auto enqueue_gemm = [&](bool inject_fault, int fault_tile, int fault_row, int fault_col, float fault_value) {
     cudaLaunchAttribute attribute{};
     attribute.id = cudaLaunchAttributeClusterDimension;
     attribute.val.clusterDim.x = 2;
@@ -669,13 +684,14 @@ int main(int argc, char** argv) {
     config.numAttrs = 1;
     CUDA_CHECK(cudaLaunchKernelEx(&config, kernel, tma_a, tma_b, d_expected_rows, d_expected_cols, d_row_scales, d_col_scales, d_c,
                                   d_bad_tiles, d_corrected_tiles, options.m, options.n, options.k, tile_rows, tile_cols, cta_rows, cta_cols,
-                                  options.abft_abs_tolerance, options.abft_rel_tolerance, options.fault_value, options.inject_fault));
+                                  options.abft_abs_tolerance, options.abft_rel_tolerance, fault_value, fault_tile, fault_row, fault_col,
+                                  inject_fault));
   };
 
   CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
   CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
   CUDA_CHECK(cudaEventRecord(start, stream));
-  enqueue_gemm();
+  enqueue_gemm(false, 0, 0, 0, 0.0f);
   CUDA_CHECK(cudaEventRecord(stop, stream));
   CUDA_CHECK(cudaEventSynchronize(stop));
   float first_gemm_abft_ms = 0.0f;
@@ -684,7 +700,7 @@ int main(int argc, char** argv) {
   for (int i = 0; i < options.warmup; ++i) {
     CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
     CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
-    enqueue_gemm();
+    enqueue_gemm(false, 0, 0, 0, 0.0f);
   }
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -693,7 +709,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
     CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
     CUDA_CHECK(cudaEventRecord(start, stream));
-    enqueue_gemm();
+    enqueue_gemm(false, 0, 0, 0, 0.0f);
     CUDA_CHECK(cudaEventRecord(stop, stream));
     CUDA_CHECK(cudaEventSynchronize(stop));
     float iteration_ms = 0.0f;
@@ -713,6 +729,85 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(&bad_tiles, d_bad_tiles, sizeof(int), cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(&corrected_tiles, d_corrected_tiles, sizeof(int), cudaMemcpyDeviceToHost));
 
+  int campaign_detected = 0;
+  int campaign_correction_attempts = 0;
+  int campaign_corrected = 0;
+  int campaign_missed = 0;
+  int campaign_detected_not_corrected = 0;
+  int campaign_miscorrected = 0;
+  float campaign_max_residual = 0.0f;
+  constexpr int kMagnitudeBins = 4;
+  int campaign_bin_trials[kMagnitudeBins] = {};
+  int campaign_bin_detected[kMagnitudeBins] = {};
+  int campaign_bin_corrected[kMagnitudeBins] = {};
+  struct FaultFailure {
+    int trial;
+    int row;
+    int col;
+    float fault;
+    int bad_tiles;
+    int corrected_tiles;
+    float residual;
+    float tolerance;
+  };
+  std::vector<FaultFailure> campaign_failures;
+  uint32_t campaign_state = static_cast<uint32_t>(options.fault_seed);
+  for (int trial = 0; trial < options.fault_trials; ++trial) {
+    campaign_state = mix_host_u32(campaign_state + 0x9e3779b9U + static_cast<uint32_t>(trial));
+    int fault_tile = static_cast<int>(campaign_state % static_cast<uint32_t>(tile_count));
+    campaign_state = mix_host_u32(campaign_state);
+    int fault_row = static_cast<int>(campaign_state % kM);
+    campaign_state = mix_host_u32(campaign_state);
+    int fault_col = static_cast<int>(campaign_state % kN);
+    campaign_state = mix_host_u32(campaign_state);
+    float magnitude_unit = static_cast<float>(campaign_state & 0x00ffffffU) / 16777215.0f;
+    float fault_magnitude = options.fault_min_value + (options.fault_max_value - options.fault_min_value) * magnitude_unit;
+    int magnitude_bin = options.fault_max_value == options.fault_min_value
+                            ? 0
+                            : std::min(kMagnitudeBins - 1, static_cast<int>(kMagnitudeBins * magnitude_unit));
+    campaign_state = mix_host_u32(campaign_state);
+    float signed_fault_value = (campaign_state & 1U) == 0 ? fault_magnitude : -fault_magnitude;
+
+    CUDA_CHECK(cudaMemsetAsync(d_bad_tiles, 0, sizeof(int), stream));
+    CUDA_CHECK(cudaMemsetAsync(d_corrected_tiles, 0, sizeof(int), stream));
+    enqueue_gemm(true, fault_tile, fault_row, fault_col, signed_fault_value);
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    int trial_bad_tiles = 0;
+    int trial_corrected_tiles = 0;
+    CUDA_CHECK(cudaMemcpy(&trial_bad_tiles, d_bad_tiles, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&trial_corrected_tiles, d_corrected_tiles, sizeof(int), cudaMemcpyDeviceToHost));
+
+    int fault_micro_row = fault_tile / tile_cols;
+    int fault_micro_col = fault_tile % tile_cols;
+    int fault_global_row = fault_micro_row * kM + fault_row;
+    int fault_global_col = fault_micro_col * kN + fault_col;
+    size_t fault_output_index = static_cast<size_t>(fault_global_col) * options.m + fault_global_row;
+    float corrected_value = 0.0f;
+    CUDA_CHECK(cudaMemcpy(&corrected_value, d_c + fault_output_index, sizeof(float), cudaMemcpyDeviceToHost));
+    float reference_value = h_c[fault_output_index];
+    float residual = fabsf(corrected_value - reference_value);
+    float recovery_tolerance = options.verify_abs_tolerance + options.verify_rel_tolerance * fmaxf(1.0f, fabsf(reference_value));
+    bool detected = trial_bad_tiles > 0;
+    bool attempted = trial_corrected_tiles > 0;
+    bool recovered = trial_bad_tiles == 1 && trial_corrected_tiles == 1 && residual <= recovery_tolerance;
+
+    campaign_detected += detected;
+    campaign_correction_attempts += attempted;
+    campaign_corrected += recovered;
+    campaign_missed += !detected;
+    campaign_detected_not_corrected += detected && !attempted;
+    campaign_miscorrected += attempted && !recovered;
+    campaign_max_residual = fmaxf(campaign_max_residual, residual);
+    ++campaign_bin_trials[magnitude_bin];
+    campaign_bin_detected[magnitude_bin] += detected;
+    campaign_bin_corrected[magnitude_bin] += recovered;
+    if (!recovered && campaign_failures.size() < 16) {
+      campaign_failures.push_back({trial, fault_global_row, fault_global_col, signed_fault_value, trial_bad_tiles, trial_corrected_tiles,
+                                   residual, recovery_tolerance});
+    }
+  }
+
   float average_ms = total_ms / options.repeat;
   float first_call_total_ms = metadata_prepare_ms + first_gemm_abft_ms;
   float amortized_ms = average_ms + metadata_prepare_ms / options.repeat;
@@ -722,11 +817,11 @@ int main(int argc, char** argv) {
   double amortized_tflops = operations / (amortized_ms * 1.0e9);
   VerificationResult verification = verify_samples(h_a, h_b, h_c, options);
   bool numerical_pass = options.verify_samples == 0 || verification.max_tolerance_ratio <= 1.0f;
-  bool abft_pass = options.inject_fault ? bad_tiles == 1 && corrected_tiles == 1 : bad_tiles == 0;
+  bool abft_pass = bad_tiles == 0;
   bool passed = numerical_pass && abft_pass;
 
   size_t metadata_bytes = (2 * (a_metadata_count + b_metadata_count) + 2 * (row_metadata_count + col_metadata_count)) * sizeof(float);
-  std::printf("version: S7 K128 2x1 cluster-multicast TMA-WGMMA ABFT\n");
+  std::printf("program: S4 random single-fault correction campaign\n");
   std::printf(
       "instruction_tile: 64x128x32, cta_tile: %dx%dx%d, "
       "tma_stage_k: %d, stages: %d\n",
@@ -760,6 +855,44 @@ int main(int argc, char** argv) {
   std::printf("abft_tolerance: abs=%.6e rel=%.6e\n", options.abft_abs_tolerance, options.abft_rel_tolerance);
   std::printf("bad_tiles: %d\n", bad_tiles);
   std::printf("corrected_tiles: %d\n", corrected_tiles);
+  if (options.fault_trials > 0) {
+    double detection_rate = 100.0 * campaign_detected / options.fault_trials;
+    double correction_rate = 100.0 * campaign_corrected / options.fault_trials;
+    int failed_trials = options.fault_trials - campaign_corrected;
+    std::printf("fault_campaign_trials: %d\n", options.fault_trials);
+    std::printf("fault_campaign_seed: %d\n", options.fault_seed);
+    std::printf("fault_campaign_magnitude_distribution: uniform [%.6e, %.6e], random sign\n", options.fault_min_value,
+                options.fault_max_value);
+    std::printf("fault_campaign_detected: %d\n", campaign_detected);
+    std::printf("fault_campaign_correction_attempts: %d\n", campaign_correction_attempts);
+    std::printf("fault_campaign_corrected: %d\n", campaign_corrected);
+    std::printf("fault_campaign_missed: %d\n", campaign_missed);
+    std::printf("fault_campaign_detected_not_corrected: %d\n", campaign_detected_not_corrected);
+    std::printf("fault_campaign_miscorrected: %d\n", campaign_miscorrected);
+    std::printf("fault_campaign_detection_rate_percent: %.3f\n", detection_rate);
+    std::printf("fault_campaign_correction_rate_percent: %.3f\n", correction_rate);
+    std::printf("fault_campaign_max_post_correction_residual: %.6e\n", campaign_max_residual);
+    float bin_width = (options.fault_max_value - options.fault_min_value) / kMagnitudeBins;
+    for (int bin = 0; bin < kMagnitudeBins; ++bin) {
+      float lower = options.fault_min_value + bin * bin_width;
+      float upper = bin == kMagnitudeBins - 1 ? options.fault_max_value : lower + bin_width;
+      double bin_detection_rate = campaign_bin_trials[bin] == 0 ? 0.0 : 100.0 * campaign_bin_detected[bin] / campaign_bin_trials[bin];
+      double bin_correction_rate = campaign_bin_trials[bin] == 0 ? 0.0 : 100.0 * campaign_bin_corrected[bin] / campaign_bin_trials[bin];
+      std::printf(
+          "fault_campaign_bin_%d: range=[%.6e, %.6e%s trials=%d detected=%d corrected=%d detection_rate=%.3f correction_rate=%.3f\n", bin,
+          lower, upper, bin == kMagnitudeBins - 1 ? "]" : ")", campaign_bin_trials[bin], campaign_bin_detected[bin],
+          campaign_bin_corrected[bin], bin_detection_rate, bin_correction_rate);
+    }
+    for (const FaultFailure& failure : campaign_failures) {
+      std::printf(
+          "fault_campaign_failure: trial=%d row=%d col=%d fault=%+.6e bad_tiles=%d corrected_tiles=%d residual=%.6e tolerance=%.6e\n",
+          failure.trial, failure.row, failure.col, failure.fault, failure.bad_tiles, failure.corrected_tiles, failure.residual,
+          failure.tolerance);
+    }
+    if (failed_trials > static_cast<int>(campaign_failures.size())) {
+      std::printf("fault_campaign_failure_records_truncated: %d\n", failed_trials - static_cast<int>(campaign_failures.size()));
+    }
+  }
   std::printf("verification_samples: %d\n", verification.checked);
   std::printf("sampled_max_absolute_error: %.6e\n", verification.max_absolute_error);
   std::printf("sampled_max_tolerance_ratio: %.6e\n", verification.max_tolerance_ratio);

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="FT-GEMM：NVIDIA Hopper FP8 ABFT GEMM 的 S0-S7 优化 Worklog">
+  <meta name="description" content="FT-GEMM：NVIDIA Hopper FP8 ABFT GEMM 的 S0-S4 优化 Worklog">
   <title>FT-GEMM · Hopper FP8 ABFT Worklog</title>
   <link rel="stylesheet" href="./styles.css">
 </head>
@@ -16,7 +16,7 @@
     <nav class="header-nav" aria-label="文章导航">
       <a href="#overview">概览</a>
       <a href="#abft">ABFT</a>
-      <a href="#stages">S0-S7</a>
+      <a href="#stages">S0-S4</a>
       <a href="#results">结果</a>
     </nav>
     <a class="github-link" href="https://github.com/chaiduo/FT-GEMM" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
@@ -32,16 +32,17 @@
         <h1 id="page-title">从 0.15 到 258.52 TFLOPS</h1>
         <p class="hero-subtitle">在 NVIDIA Hopper 上逐步优化一个可检测、可定位并纠正单点错误的 FP8 GEMM。</p>
         <p class="hero-summary">
-          这不是一个只展示最终结果的算子。S0-S7 保留每次关键设计变化：从原生 shared-memory
-          分块，到 Tensor Core、TMA 双缓冲、校验缓存、warp specialization 与 cluster multicast。
+          这不是一个只展示最终结果的算子。S0-S4 保留严格递增的关键设计变化：从原生
+          shared-memory 分块，到 Tensor Core、TMA 双缓冲、校验缓存、warp specialization
+          与 cluster multicast。
         </p>
         <div class="hero-actions">
           <a class="primary-link" href="#stages">阅读优化过程</a>
           <a class="secondary-link" href="#results">查看统一测试结果</a>
         </div>
         <dl class="hero-metrics">
-          <div><dt>S7 steady-state</dt><dd>258.52 <small>TFLOPS</small></dd></div>
-          <div><dt>相对 S0</dt><dd>1740.9<small>×</small></dd></div>
+          <div><dt>S4 steady-state</dt><dd>256.52 <small>TFLOPS</small></dd></div>
+          <div><dt>相对 S0</dt><dd>66.7<small>×</small></dd></div>
           <div><dt>cuBLASLt reference</dt><dd>95.3<small>%</small></dd></div>
         </dl>
       </div>
@@ -72,25 +73,22 @@
 
       <section class="article-section summary-section">
         <div class="section-heading-row">
-          <div><p class="section-label">02 / RESULT AT A GLANCE</p><h2>八个阶段，一条可复现路径</h2></div>
+          <div><p class="section-label">02 / RESULT AT A GLANCE</p><h2>五个阶段，一条递增路径</h2></div>
           <p>H20 · M=N=K=4096 · FP8 E4M3 · FP32 accumulation/output</p>
         </div>
         <div class="summary-table-wrap">
           <table class="summary-table">
             <thead><tr><th>Stage</th><th>关键变化</th><th>Steady time</th><th>Metadata</th><th>First call</th><th>TFLOPS</th><th>vs. cuBLASLt</th></tr></thead>
             <tbody>
-              <tr><td>S0</td><td>Native tiled ABFT</td><td>925.504 ms</td><td>—</td><td>925.504 ms</td><td>0.1485</td><td>0.05%</td></tr>
-              <tr><td>S1</td><td>Multi-stream pipeline</td><td>543.968 ms</td><td>—</td><td>543.968 ms</td><td>0.2527</td><td>0.09%</td></tr>
-              <tr><td>S2</td><td>WGMMA pipeline</td><td>35.240 ms</td><td>20.411 ms</td><td>55.651 ms</td><td>3.90</td><td>1.44%</td></tr>
-              <tr><td>S3</td><td>Fully online TMA-WGMMA ABFT</td><td>4.139 ms</td><td>—</td><td>4.139 ms</td><td>33.21</td><td>12.24%</td></tr>
-              <tr><td>S4</td><td>Cross-CTA input cache</td><td>3.454 ms</td><td>0.135 ms</td><td>3.425 ms</td><td>39.79</td><td>14.67%</td></tr>
-              <tr><td>S5</td><td>Full expected-checksum cache</td><td>1.035 ms</td><td>1.982 ms</td><td>3.015 ms</td><td>132.85</td><td>48.97%</td></tr>
-              <tr><td>S6</td><td>128×128 warp-specialized</td><td>0.587 ms</td><td>1.934 ms</td><td>2.522 ms</td><td>234.08</td><td>86.28%</td></tr>
-              <tr class="highlight-row"><td>S7</td><td>K128 + 2×1 cluster multicast</td><td>0.532 ms</td><td>1.944 ms</td><td>2.476 ms</td><td>258.52</td><td>95.29%</td></tr>
+              <tr><td>S0</td><td>Native tiled ABFT</td><td>35.726 ms</td><td>160.517 ms</td><td>196.243 ms</td><td>3.847</td><td>1.42%</td></tr>
+              <tr><td>S1</td><td>TMA + WGMMA</td><td>1.068 ms</td><td>89.342 ms</td><td>90.410 ms</td><td>128.738</td><td>47.45%</td></tr>
+              <tr><td>S2</td><td>Expected-checksum cache</td><td>1.037 ms</td><td>1.932 ms</td><td>2.969 ms</td><td>132.524</td><td>48.83%</td></tr>
+              <tr><td>S3</td><td>128×128 warp specialization</td><td>0.591 ms</td><td>1.937 ms</td><td>2.528 ms</td><td>232.608</td><td>85.74%</td></tr>
+              <tr class="highlight-row"><td>S4</td><td>K128 + 2×1 cluster multicast</td><td>0.536 ms</td><td>1.934 ms</td><td>2.470 ms</td><td>256.520</td><td>94.55%</td></tr>
             </tbody>
           </table>
         </div>
-        <p class="measurement-note">S4-S7 的稳态结果要求复用由 A/B 派生的 metadata；输入变化时应使用 first-call 或摊销时间。S3 是输入每次变化时的 fully-online 对照。</p>
+        <p class="measurement-note">S1-S4 的稳态结果要求复用由 A/B 派生的 metadata；输入变化时应使用 first-call 或摊销时间。</p>
         <div class="method-grid">
           <div><span>STEADY-STATE</span><strong>只计主 Kernel</strong><p>适用于权重或输入 metadata 可跨调用复用的服务场景。</p></div>
           <div><span>FIRST CALL</span><strong>Metadata + Kernel</strong><p>反映 A/B 改变后第一次调用的完整延迟。</p></div>
@@ -140,13 +138,13 @@ C[bad_row,bad_col] +=
         <p>每个阶段保留独立源码文件。下面按瓶颈、代码变化、数据流和实测结果说明为什么下一步成立。</p>
         <nav class="stage-nav" aria-label="优化阶段导航">
           <a href="#s0" data-stage="S0">S0</a><a href="#s1" data-stage="S1">S1</a><a href="#s2" data-stage="S2">S2</a><a href="#s3" data-stage="S3">S3</a>
-          <a href="#s4" data-stage="S4">S4</a><a href="#s5" data-stage="S5">S5</a><a href="#s6" data-stage="S6">S6</a><a href="#s7" data-stage="S7">S7</a>
+          <a href="#s4" data-stage="S4">S4</a>
         </nav>
       </section>
 
       <section id="s0" class="stage-section" data-stage="S0">
-        <header class="stage-header"><span class="stage-number">S0</span><div><p>Correctness baseline</p><h2>Native Tiled ABFT</h2></div><strong>0.1485 <small>TFLOPS</small></strong></header>
-        <div class="stage-copy"><h3>先做正确，再谈性能</h3><p>16×16 CUDA Tile 将 A/B 搬入 shared memory 后执行标量 FMA。GEMM 与 ABFT 分成两个 kernel，期望 checksum 对每个输出 Tile 重新扫描输入，因此校验成为主耗时。</p><ul class="stage-details"><li><strong>机制</strong>每个线程负责一个 C 元素，K 维按 16 分段加载，阶段之间使用 <code>__syncthreads()</code>。</li><li><strong>收益</strong>建立清晰的数值基线和故障注入接口，便于后续版本逐项验证。</li><li><strong>剩余瓶颈</strong>标量 FMA 未使用 Tensor Core，ABFT 额外读取 A、B、C，校验耗时约占总时间 94.6%。</li></ul><div class="stage-facts"><span>瓶颈：重复 A/B 扫描</span><span>总耗时：925.504 ms</span></div></div>
+        <header class="stage-header"><span class="stage-number">S0</span><div><p>Correctness baseline</p><h2>Native Tiled ABFT</h2></div><strong>3.847 <small>TFLOPS</small></strong></header>
+        <div class="stage-copy"><h3>先做正确，再谈性能</h3><p>16×16 CUDA Tile 将 A/B 搬入 shared memory 后执行标量 FMA。GEMM 与 ABFT 分成两个 kernel，期望 checksum 对每个输出 Tile 重新扫描输入，因此校验成为主耗时。</p><ul class="stage-details"><li><strong>机制</strong>每个线程负责一个 C 元素，K 维按 16 分段加载，阶段之间使用 <code>__syncthreads()</code>。</li><li><strong>收益</strong>建立清晰的数值基线和故障注入接口，便于后续版本逐项验证。</li><li><strong>剩余瓶颈</strong>标量 FMA 未使用 Tensor Core，ABFT 额外读取 A、B、C，校验耗时仍占主要比例。</li></ul><div class="stage-facts"><span>瓶颈：重复 A/B 扫描</span><span>稳态：35.726 ms</span></div></div>
         <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s0_tiled_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s0_tiled_abft_fp8_gemm.cu ↗</a></div><pre><code>__shared__ Element a_tile[16][16];
 __shared__ Element b_tile[16][16];
 
@@ -156,65 +154,26 @@ for (int kk = 0; kk &lt; 16; ++kk) {
 }
 
 tile_abft_kernel&lt;&lt;&lt;tile_count, block&gt;&gt;&gt;(...);</code></pre></div>
-        <figure class="stage-figure diagram-s0"><div class="flow-line"><div class="node data">A / B<br><small>Global FP8</small></div><i></i><div class="node compute">16×16 Tile<br><small>scalar FMA</small></div><i></i><div class="node output">C Tile<br><small>FP32</small></div></div><div class="separate-check"><div class="node check">Expected Σ<br><small>scan A/B again</small></div><div class="node check">Actual Σ<br><small>reduce C</small></div><i></i><div class="node verify">Detect<br><small>correct</small></div></div><div class="diagram-notes"><span>K / 16 phases</span><span>2 barriers / phase</span><span>ABFT 875.315 ms</span></div><figcaption>两条独立路径重复读取与同步，是后续优化的起点。</figcaption></figure>
+        <figure class="stage-figure diagram-s0"><div class="flow-line"><div class="node data">A / B<br><small>Global FP8</small></div><i></i><div class="node compute">16×16 Tile<br><small>scalar FMA</small></div><i></i><div class="node output">C Tile<br><small>FP32</small></div></div><div class="separate-check"><div class="node check">Expected Σ<br><small>scan A/B again</small></div><div class="node check">Actual Σ<br><small>reduce C</small></div><i></i><div class="node verify">Detect<br><small>correct</small></div></div><div class="diagram-notes"><span>K / 16 phases</span><span>2 barriers / phase</span><span>35.726 ms steady</span></div><figcaption>两条独立路径重复读取与同步，是后续优化的起点。</figcaption></figure>
       </section>
 
       <section id="s1" class="stage-section" data-stage="S1">
-        <header class="stage-header"><span class="stage-number">S1</span><div><p>Overlap independent work</p><h2>Batched Multi-stream Pipeline</h2></div><strong>0.2527 <small>TFLOPS</small></strong></header>
-        <div class="stage-copy"><h3>用批次间并发隐藏校验耗时</h3><p>输出 Tile 被切成批次，GEMM、Checksum 与 Detect/Correct 分配到三条非阻塞 Stream，并由 CUDA Event 维护依赖。</p><ul class="stage-details"><li><strong>机制</strong><code>gemm_done</code> 与 <code>checksum_done</code> 只建立必要的跨流依赖，不做全设备同步。</li><li><strong>收益</strong>稳态时形成 GEMM(i+1)、Checksum(i)、ABFT(i-1) 的三级流水。</li><li><strong>剩余瓶颈</strong>kernel launch、event 与小批次调度开销仍高，核心计算依然是标量 CUDA Core。</li></ul><div class="stage-facts"><span>阶段提升：1.70×</span><span>限制：launch / event 开销</span></div></div>
-        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s1_pipeline_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s1_pipeline_abft_fp8_gemm.cu ↗</a></div><pre><code>cudaEventRecord(gemm_done[batch], gemm_stream);
-cudaStreamWaitEvent(checksum_stream,
-                    gemm_done[batch], 0);
-tile_checksum_kernel&lt;&lt;&lt;..., checksum_stream&gt;&gt;&gt;(...);
-
-cudaStreamWaitEvent(abft_stream,
-                    checksum_done[batch], 0);
-tile_abft_kernel&lt;&lt;&lt;..., abft_stream&gt;&gt;&gt;(...);</code></pre></div>
-        <figure class="stage-figure diagram-s1"><div class="time-labels"><span>t0</span><span>t1</span><span>t2</span><span>t3</span></div><div class="stream-row"><b>GEMM</b><span class="compute">batch 0</span><span class="compute">batch 1</span><span class="compute">batch 2</span></div><div class="stream-row"><b>CHECK</b><span></span><span class="check">batch 0</span><span class="check">batch 1</span></div><div class="stream-row"><b>ABFT</b><span></span><span></span><span class="verify">batch 0</span></div><div class="event-track"><span>gemm_done[0]</span><i></i><span>checksum_done[0]</span><i></i><span>ABFT ready</span></div><div class="diagram-notes"><span>3 non-blocking streams</span><span>event-ordered</span><span>no device sync</span></div><figcaption>GEMM(i+1) ∥ checksum(i) ∥ ABFT(i-1)</figcaption></figure>
-      </section>
-
-      <section id="s2" class="stage-section" data-stage="S2">
-        <header class="stage-header"><span class="stage-number">S2</span><div><p>Tensor Core mainloop</p><h2>CUTE / WGMMA Pipeline</h2></div><strong>3.90 <small>TFLOPS</small></strong></header>
-        <div class="stage-copy"><h3>把标量 FMA 替换为 Hopper WGMMA</h3><p>使用 CUTE 构造 m64n64k32.f32.e4m3.e4m3 原子，128 线程 warpgroup 共同发射 Tensor Core 指令。同步 global-to-shared 搬运仍限制性能。</p><ul class="stage-details"><li><strong>机制</strong>四个 warp 组成 warpgroup，共享一个 WGMMA fragment，并通过 arrive、commit、wait 管理异步矩阵指令。</li><li><strong>收益</strong>将热点从标量 FMA 转移到 Hopper Tensor Core，单阶段吞吐提高 15.43 倍。</li><li><strong>剩余瓶颈</strong>A/B 搬运仍是同步路径，checksum 与 GEMM 仍由独立调度链维护。</li></ul><div class="stage-facts"><span>阶段提升：15.43×</span><span>Tile：64×64×32</span></div></div>
-        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s2_wgmma_pipeline_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s2_wgmma_pipeline_abft_fp8_gemm.cu ↗</a></div><pre><code>using TileShape = cute::Shape&lt;_64, _64, _32&gt;;
-using TiledMma = decltype(cute::make_tiled_mma(GmmaOp{}));
-
-cute::warpgroup_arrive();
-cute::gemm(tiled_mma, tCrA, tCrB, accum);
-cute::warpgroup_commit_batch();
-cute::warpgroup_wait&lt;0&gt;();</code></pre></div>
-        <figure class="stage-figure diagram-s2"><div class="warpgroup-strip"><span>warp 0</span><span>warp 1</span><span>warp 2</span><span>warp 3</span></div><div class="flow-line"><div class="node data">Global A/B</div><i></i><div class="node memory">Shared<br><small>sync copy</small></div><i></i><div class="node compute strong">WGMMA<br><small>m64n64k32</small></div><i></i><div class="node output">FP32 accum</div></div><div class="under-note"><span>warpgroup arrive</span><i></i><span>commit batch</span><i></i><span>wait&lt;0&gt;</span></div><div class="diagram-notes"><span>128 threads</span><span>SM90 GMMA</span><span>separate checksum</span></div><figcaption>计算吞吐跃升后，瓶颈从 FMA 转移到数据搬运与独立校验调度。</figcaption></figure>
-      </section>
-
-      <section id="s3" class="stage-section" data-stage="S3">
-        <header class="stage-header"><span class="stage-number">S3</span><div><p>Fully online fusion</p><h2>TMA-WGMMA Fused ABFT</h2></div><strong>33.21 <small>TFLOPS</small></strong></header>
-        <div class="stage-copy"><h3>输入只进入 CTA 一次</h3><p>TMA 双缓冲预取下一 K Tile，WGMMA 消费当前 Tile；期望 checksum 与 mainloop 同时生成，实际 checksum、检测和纠错融合在唯一一次 C 写回之前。</p><ul class="stage-details"><li><strong>机制</strong>两个 shared-memory stage 由 full/empty mbarrier 交替保护，phase 每绕过环形缓冲一次翻转。</li><li><strong>收益</strong>TMA(k+1) 与 WGMMA(k) 重叠，并消除独立 checksum kernel 与额外 C 往返。</li><li><strong>剩余瓶颈</strong>期望行列和仍在主 kernel 的 K-loop 中标量生成，拖慢 Tensor Core 主循环。</li></ul><div class="stage-facts"><span>阶段提升：8.52×</span><span>A/B 每次变化仍公平</span></div></div>
-        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s3_fused_online_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s3_fused_online_abft_fp8_gemm.cu ↗</a></div><pre><code>int read_stage = k_tile % kStages;
+        <header class="stage-header"><span class="stage-number">S1</span><div><p>Tensor Core data path</p><h2>TMA-WGMMA ABFT</h2></div><strong>128.738 <small>TFLOPS</small></strong></header>
+        <div class="stage-copy"><h3>把数据搬运和矩阵计算异步化</h3><p>TMA 双缓冲预取下一 K Tile，WGMMA 消费当前 Tile；expected checksum 在 GEMM 前准备，actual checksum、检测和纠错融合在输出路径。</p><ul class="stage-details"><li><strong>机制</strong>两个 shared-memory stage 由 full/empty mbarrier 交替保护，phase 每绕过环形缓冲一次翻转。</li><li><strong>收益</strong>TMA(k+1) 与 WGMMA(k) 重叠，并把 FP8 矩阵乘法迁移到 Hopper Tensor Core。</li><li><strong>剩余瓶颈</strong>完整 expected checksum 仍需在每次输入变化时准备，主 CTA 仍采用 64x64 Tile。</li></ul><div class="stage-facts"><span>阶段提升：33.5×</span><span>TMA + WGMMA</span></div></div>
+        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s1_tma_wgmma_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s1_tma_wgmma_abft_fp8_gemm.cu ↗</a></div><pre><code>int read_stage = k_tile % kStages;
 Barrier::wait(&amp;storage.full_barrier[read_stage], phase);
 
 // TMA(k+1) overlaps WGMMA(k)
 cute::copy(tma_a.with(storage.full_barrier[write_stage]),
            next_gA, next_sA);
 cute::gemm(tiled_mma, tCrA, tCrB, accum);</code></pre></div>
-        <figure class="stage-figure diagram-s3"><div class="barrier-row"><span>empty[0]</span><span>full[0]</span><span>empty[1]</span><span>full[1]</span></div><div class="buffer-row"><span class="active">stage 0 · WGMMA(k)</span><span>stage 1 · TMA(k+1)</span></div><div class="fused-row"><div class="node compute">WGMMA</div><b>∥</b><div class="node check">Expected Σ</div><i></i><div class="node verify">Actual Σ<br><small>detect / correct</small></div><i></i><div class="node output">Store C<br><small>once</small></div></div><div class="diagram-notes"><span>2 stages</span><span>phase = ⌊k/2⌋ mod 2</span><span>128 threads</span></div><figcaption>Fully-online 路径消除独立 metadata pass，标量期望校验成为新瓶颈。</figcaption></figure>
+        <figure class="stage-figure diagram-s1"><div class="barrier-row"><span>empty[0]</span><span>full[0]</span><span>empty[1]</span><span>full[1]</span></div><div class="buffer-row"><span class="active">stage 0 · WGMMA(k)</span><span>stage 1 · TMA(k+1)</span></div><div class="fused-row"><div class="node compute">WGMMA</div><b>∥</b><div class="node check">Expected Σ</div><i></i><div class="node verify">Actual Σ<br><small>detect / correct</small></div><i></i><div class="node output">Store C<br><small>once</small></div></div><div class="diagram-notes"><span>2 stages</span><span>phase = floor(k/2) mod 2</span><span>128 threads</span></div><figcaption>TMA 隐藏访存延迟，WGMMA 负责主要矩阵计算。</figcaption></figure>
       </section>
 
-      <section id="s4" class="stage-section" data-stage="S4">
-        <header class="stage-header"><span class="stage-number">S4</span><div><p>Cross-CTA reuse</p><h2>Input Checksum Cache</h2></div><strong>39.79 <small>TFLOPS</small></strong></header>
-        <div class="stage-copy"><h3>输入摘要只算一次</h3><p>预计算 A/B Tile 的和与幅值。A metadata 沿 N 方向复用，B metadata 沿 M 方向复用，主 kernel 仍组合完整 expected checksum。</p><ul class="stage-details"><li><strong>机制</strong>独立 kernel 为每个 64 行 A Tile 和 64 列 B Tile 生成 sum 与 magnitude。</li><li><strong>收益</strong>同一 A 摘要可供整行 CTA 复用，同一 B 摘要可供整列 CTA 复用，消除跨 CTA 重复扫描。</li><li><strong>剩余瓶颈</strong>主 kernel 仍需沿 K 维组合输入摘要，metadata 仅在 A/B 不变时可跨调用复用。</li></ul><div class="stage-facts"><span>Metadata：0.135 ms</span><span>条件：A/B 不变</span></div></div>
-        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s4_cached_input_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s4_cached_input_abft_fp8_gemm.cu ↗</a></div><pre><code>cache_input_tile_checksums_kernel&lt;&lt;&lt;
-  tile_rows + tile_cols, 256, 0, stream&gt;&gt;&gt;(
-  d_a, d_b,
-  d_a_sums, d_a_magnitudes,
-  d_b_sums, d_b_magnitudes,
-  n, k, tile_rows, tile_cols);</code></pre></div>
-        <figure class="stage-figure diagram-s4"><div class="cache-a"><b>A Σ / |A|</b><small>[tile_rows, K] · reuse across N</small></div><div class="cta-grid"><span>CTA 0,0<small>A0 + B0</small></span><span>CTA 0,1<small>A0 + B1</small></span><span>CTA 0,2<small>A0 + B2</small></span><span>CTA 1,0<small>A1 + B0</small></span><span>CTA 1,1<small>A1 + B1</small></span><span>CTA 1,2<small>A1 + B2</small></span></div><div class="cache-b"><b>B Σ / |B|</b><small>[tile_cols, K]<br>reuse across M</small></div><div class="diagram-notes"><span>sum</span><span>magnitude</span><span>0.135 ms metadata</span></div><figcaption>消除跨 CTA 的重复输入扫描；输入变化时 metadata 必须计入总时间。</figcaption></figure>
-      </section>
-
-      <section id="s5" class="stage-section" data-stage="S5">
-        <header class="stage-header"><span class="stage-number">S5</span><div><p>Move work off hot path</p><h2>Full Expected-checksum Cache</h2></div><strong>132.85 <small>TFLOPS</small></strong></header>
+      <section id="s2" class="stage-section" data-stage="S2">
+        <header class="stage-header"><span class="stage-number">S2</span><div><p>Move work off hot path</p><h2>Full Expected-checksum Cache</h2></div><strong>132.524 <small>TFLOPS</small></strong></header>
         <div class="stage-copy"><h3>将完整期望值移出 K-loop</h3><p>Metadata kernel 为每条 checksum 分配一个 warp，32 个 lane 并行 K 维归约。主 kernel 只保留 actual reduction、阈值判断、纠正和写回。</p><ul class="stage-details"><li><strong>机制</strong>每个 lane 以步长 32 遍历 K，随后通过 <code>__shfl_down_sync</code> 完成 warp 内归约。</li><li><strong>收益</strong>完整 expected row/column checksum 在冷路径生成，稳态主 kernel 不再读取 A/B metadata。</li><li><strong>剩余瓶颈</strong>64×64 CTA 工作量偏小，TMA、WGMMA 与校验仍由同一 warpgroup 交错承担。</li></ul><div class="stage-facts"><span>阶段提升：3.34×</span><span>First call：3.015 ms</span></div></div>
-        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s5_expected_cache_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s5_expected_cache_abft_fp8_gemm.cu ↗</a></div><pre><code>for (int kk = lane; kk &lt; k; kk += 32) {
+        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s2_expected_cache_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s2_expected_cache_abft_fp8_gemm.cu ↗</a></div><pre><code>for (int kk = lane; kk &lt; k; kk += 32) {
   expected += avalue * b_sums[tile_col * k + kk];
 }
 #pragma unroll
@@ -222,26 +181,26 @@ for (int offset = 16; offset &gt; 0; offset /= 2) {
   expected += __shfl_down_sync(0xffffffffU,
                                expected, offset);
 }</code></pre></div>
-        <figure class="stage-figure diagram-s5"><div class="path-row cold"><b>COLD</b><div class="node data">A / B</div><i></i><div class="node check">32-lane K reduce</div><i></i><div class="node cache">Expected Σ cache<br><small>row + column</small></div></div><div class="path-row hot"><b>HOT</b><div class="node compute">WGMMA</div><i></i><div class="node verify">Actual Σ<br><small>compare / correct</small></div><i></i><div class="node output">C</div></div><div class="diagram-notes"><span>1 warp / checksum</span><span>shuffle reduction</span><span>metadata 1.982 ms</span></div><figcaption>稳态 mainloop 不再扫描 A/B，性能首次进入百 TFLOPS 区间。</figcaption></figure>
+        <figure class="stage-figure diagram-s2"><div class="path-row cold"><b>COLD</b><div class="node data">A / B</div><i></i><div class="node check">32-lane K reduce</div><i></i><div class="node cache">Expected Σ cache<br><small>row + column</small></div></div><div class="path-row hot"><b>HOT</b><div class="node compute">WGMMA</div><i></i><div class="node verify">Actual Σ<br><small>compare / correct</small></div><i></i><div class="node output">C</div></div><div class="diagram-notes"><span>1 warp / checksum</span><span>shuffle reduction</span><span>metadata 1.932 ms</span></div><figcaption>稳态 mainloop 不再扫描 A/B，性能继续提升。</figcaption></figure>
       </section>
 
-      <section id="s6" class="stage-section" data-stage="S6">
-        <header class="stage-header"><span class="stage-number">S6</span><div><p>Warp specialization</p><h2>Wide 128×128 Mainloop</h2></div><strong>234.08 <small>TFLOPS</small></strong></header>
+      <section id="s3" class="stage-section" data-stage="S3">
+        <header class="stage-header"><span class="stage-number">S3</span><div><p>Warp specialization</p><h2>Wide 128×128 Mainloop</h2></div><strong>232.608 <small>TFLOPS</small></strong></header>
         <div class="stage-copy"><h3>让搬运、计算和校验各司其职</h3><p>CTA 扩展为 128×128×32：一个 32 线程 producer warp 管 TMA，两个 128 线程 consumer warpgroups 管 WGMMA；输出阶段由 consumer threads 覆盖四个 64×64 ABFT 子块。</p><ul class="stage-details"><li><strong>机制</strong>producer 只推进三阶段 TMA 环形缓冲，consumer 在独立 warpgroup 中等待 full barrier 后发射 WGMMA。</li><li><strong>收益</strong>扩大 CTA 提高每次 TMA 的计算复用，并减少 64×64 Tile 的调度开销。</li><li><strong>平衡点</strong>90 registers/thread 与 shared-memory 占用仍允许 2 CTAs/SM，保持足够并发。</li></ul><div class="stage-facts"><span>288 threads / CTA</span><span>2 active CTAs/SM</span></div></div>
-        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s6_warpspecialized_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s6_warpspecialized_abft_fp8_gemm.cu ↗</a></div><pre><code>bool is_consumer = threadIdx.x &lt; kConsumerThreads;
+        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s3_warpspecialized_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s3_warpspecialized_abft_fp8_gemm.cu ↗</a></div><pre><code>bool is_consumer = threadIdx.x &lt; kConsumerThreads;
 bool is_producer = !is_consumer;
 bool is_producer_leader =
     threadIdx.x == kConsumerThreads;
 
 Barrier::init(&amp;storage.tma_empty_barrier[stage],
               kConsumerWarpgroups);</code></pre></div>
-        <figure class="stage-figure diagram-s6"><div class="producer-band"><b>P</b><span>32-thread TMA producer</span><i></i><i></i><i></i><small>stage 0 / 1 / 2</small></div><div class="consumer-labels"><span>Consumer WG0 · 128 threads</span><span>Consumer WG1 · 128 threads</span></div><div class="tile-map"><div><b>64×64</b><span>WGMMA</span><small>ABFT subtile 0</small></div><div><b>64×64</b><span>WGMMA</span><small>ABFT subtile 1</small></div><div><b>64×64</b><span>WGMMA</span><small>ABFT subtile 2</small></div><div><b>64×64</b><span>WGMMA</span><small>ABFT subtile 3</small></div></div><div class="diagram-notes"><span>288 threads</span><span>3 TMA stages</span><span>2 CTAs / SM</span></div><figcaption>128×128 在单 CTA 工作量与两 CTA/SM 占用率之间取得平衡。</figcaption></figure>
+        <figure class="stage-figure diagram-s3"><div class="producer-band"><b>P</b><span>32-thread TMA producer</span><i></i><i></i><i></i><small>stage 0 / 1 / 2</small></div><div class="consumer-labels"><span>Consumer WG0 · 128 threads</span><span>Consumer WG1 · 128 threads</span></div><div class="tile-map"><div><b>64×64</b><span>WGMMA</span><small>ABFT subtile 0</small></div><div><b>64×64</b><span>WGMMA</span><small>ABFT subtile 1</small></div><div><b>64×64</b><span>WGMMA</span><small>ABFT subtile 2</small></div><div><b>64×64</b><span>WGMMA</span><small>ABFT subtile 3</small></div></div><div class="diagram-notes"><span>288 threads</span><span>3 TMA stages</span><span>2 CTAs / SM</span></div><figcaption>128×128 在单 CTA 工作量与两 CTA/SM 占用率之间取得平衡。</figcaption></figure>
       </section>
 
-      <section id="s7" class="stage-section final-stage" data-stage="S7">
-        <header class="stage-header"><span class="stage-number">S7</span><div><p>K128 + cluster multicast</p><h2>跨 CTA 复用 A Tile</h2></div><strong>258.52 <small>TFLOPS</small></strong></header>
+      <section id="s4" class="stage-section final-stage" data-stage="S4">
+        <header class="stage-header"><span class="stage-number">S4</span><div><p>K128 + cluster multicast</p><h2>跨 CTA 复用 A Tile</h2></div><strong>256.520 <small>TFLOPS</small></strong></header>
         <div class="stage-copy"><h3>摊薄同步成本，复用 global traffic</h3><p>每个 TMA stage 扩展到 K128，一次同步连续发射四个 K32 WGMMA。2×1 CTA cluster multicast A，B 由两个 CTA 分别加载。</p><ul class="stage-details"><li><strong>机制</strong>cluster rank 0 发起 A Tile multicast，mask <code>0x3</code> 同时投递到两个 CTA；每个 CTA 独立加载自己的 B Tile。</li><li><strong>收益</strong>A 的 global-memory 流量在两个 N 邻接 CTA 间复用，K128 将 barrier 成本摊到四次 WGMMA。</li><li><strong>占用率恢复</strong>A/B mainloop storage 与 C epilogue storage 按生命周期复用，将 shared memory 控制在 100,608 B。</li></ul><div class="stage-facts"><span>Shared：100,608 B</span><span>cuBLASLt：95.3%</span></div></div>
-        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s7_cluster_multicast_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s7_cluster_multicast_abft_fp8_gemm.cu ↗</a></div><pre><code>__global__ void __cluster_dims__(2, 1, 1)
+        <div class="stage-code"><div class="code-head"><span>CODE EXCERPT</span><a href="https://github.com/chaiduo/FT-GEMM/blob/master/src/s4_cluster_multicast_abft_fp8_gemm.cu" target="_blank" rel="noreferrer">s4_cluster_multicast_abft_fp8_gemm.cu ↗</a></div><pre><code>__global__ void __cluster_dims__(2, 1, 1)
 k128_cluster_abft_kernel(...) {
   int rank = cute::block_rank_in_cluster();
   constexpr uint16_t multicast_mask = 0x3;
@@ -249,17 +208,17 @@ k128_cluster_abft_kernel(...) {
                         multicast_mask),
              gA, sA);
 }</code></pre></div>
-        <figure class="stage-figure diagram-s7"><div class="cluster-title">2×1 CTA CLUSTER · rank 0 / rank 1</div><div class="multicast-source"><b>A · 128×128</b><small>TMA multicast · mask 0x3</small></div><div class="multicast-lines"><i></i><i></i></div><div class="cluster-ctas"><div><span>CTA rank 0</span><b>B0 · local TMA</b><strong>K128 = 4 × K32 WGMMA</strong><small>4 ABFT subtiles + C0</small></div><div><span>CTA rank 1</span><b>B1 · local TMA</b><strong>K128 = 4 × K32 WGMMA</strong><small>4 ABFT subtiles + C1</small></div></div><div class="barrier-protocol"><span>cluster arrive</span><i></i><span>TMA full barrier</span><i></i><span>consumer release</span></div><div class="alias-line"><span>A/B mainloop storage</span><b>lifetime alias</b><span>C epilogue storage</span></div><div class="diagram-notes"><span>3 stages</span><span>100,608 B shared</span><span>2 CTAs / SM</span></div><figcaption>Cluster barrier 保护共享 A；lifetime aliasing 恢复两 CTA/SM。</figcaption></figure>
+        <figure class="stage-figure diagram-s4"><div class="cluster-title">2×1 CTA CLUSTER · rank 0 / rank 1</div><div class="multicast-source"><b>A · 128×128</b><small>TMA multicast · mask 0x3</small></div><div class="multicast-lines"><i></i><i></i></div><div class="cluster-ctas"><div><span>CTA rank 0</span><b>B0 · local TMA</b><strong>K128 = 4 × K32 WGMMA</strong><small>4 ABFT subtiles + C0</small></div><div><span>CTA rank 1</span><b>B1 · local TMA</b><strong>K128 = 4 × K32 WGMMA</strong><small>4 ABFT subtiles + C1</small></div></div><div class="barrier-protocol"><span>cluster arrive</span><i></i><span>TMA full barrier</span><i></i><span>consumer release</span></div><div class="alias-line"><span>A/B mainloop storage</span><b>lifetime alias</b><span>C epilogue storage</span></div><div class="diagram-notes"><span>3 stages</span><span>100,608 B shared</span><span>2 CTAs / SM</span></div><figcaption>Cluster barrier 保护共享 A；lifetime aliasing 恢复两 CTA/SM。</figcaption></figure>
       </section>
 
       <section id="results" class="article-section results-section">
         <p class="section-label">05 / MEASURED RESULT</p>
-        <div class="section-heading-row"><div><h2>最终达到 cuBLASLt 的 95.3%</h2><p>S7 steady-state kernel 0.532 ms；独立 cuBLASLt FP8 reference 为 271.3 TFLOPS。</p></div><strong class="result-number">258.52 <small>TFLOPS</small></strong></div>
-        <div class="bars" aria-label="S7 与 cuBLASLt 性能对比">
-          <div><span>S7 Cluster Multicast</span><i><b style="width:95.3%"></b></i><strong>258.52</strong></div>
+        <div class="section-heading-row"><div><h2>最终达到 cuBLASLt 的约 94.6%</h2><p>S4 steady-state kernel 0.536 ms；独立 cuBLASLt FP8 reference 为 271.3 TFLOPS。</p></div><strong class="result-number">256.52 <small>TFLOPS</small></strong></div>
+        <div class="bars" aria-label="S4 与 cuBLASLt 性能对比">
+          <div><span>S4 Cluster Multicast</span><i><b style="width:94.6%"></b></i><strong>256.52</strong></div>
           <div><span>cuBLASLt FP8</span><i><b style="width:100%"></b></i><strong>271.30</strong></div>
         </div>
-        <div class="result-caveat"><strong>正确引用数据</strong><p>S4-S7 的 steady-state 依赖可复用 metadata。A/B 变化时应报告 first-call 或 amortized time；S3 是 fully-online 结果。</p></div>
+        <div class="result-caveat"><strong>正确引用数据</strong><p>S1-S4 的 steady-state 依赖可复用 metadata。A/B 变化时应报告 first-call 或 amortized time。</p></div>
       </section>
     </article>
   </main>
