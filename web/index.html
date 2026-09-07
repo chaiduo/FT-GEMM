@@ -56,13 +56,16 @@
         <p class="section-label">01 / THE PROBLEM</p>
         <h2>为什么要把容错做进 GEMM？</h2>
         <p class="article-lead">
-          FP8 提高吞吐并降低带宽压力，但更低精度与更大规模计算也提高了数值错误被放大的风险。
-          FT-GEMM 让每个输出 Tile 同时拥有行、列校验和：一个异常行与一个异常列的交点，即为可纠正元素。
+          GPU 运行过程中可能出现瞬态位翻转等软错误，它们不一定触发硬件异常，却可能让 GEMM
+          输出发生 SDC（Silent Data Corruption），并将错误结果继续传播到后续计算。将 ABFT
+          放进 GEMM 流程，可以在输出 Tile 写回前检测、定位并纠正单点异常，及时阻断错误传播。
         </p>
         <p class="article-detail">
-          优化过程中，计算从标量 CUDA Core 迁移到 WGMMA，数据搬运从同步拷贝迁移到 TMA，
-          校验数据则从在线重算逐步迁移到可复用缓存。每一阶段都保留相同的 FP8 输入、FP32
-          累加与 Tile-local ABFT 语义，确保性能提升不是以移除容错能力为代价。
+          挑战在于 FP8 的表示精度和动态范围都更小，长 K 维累加会放大量化误差与舍入误差，
+          使正常数值噪声更容易接近故障残差。因此 GEMM 沿 K 维分块累加，并将输出划分为
+          独立 Tile，在局部范围内计算行列校验和，控制单次累加跨度与校验阈值尺度。后续优化
+          只是把计算迁移到 WGMMA、把搬运迁移到 TMA，并缓存可复用 checksum；FP8 输入、
+          FP32 累加输出和 Tile-local ABFT 语义始终保持不变。
         </p>
         <div class="premise-grid">
           <div><span>INPUT</span><strong>FP8 E4M3</strong><p>A、B 使用低精度存储；所有阶段采用统一矩阵布局与输入口径。</p></div>
