@@ -8,6 +8,20 @@ correction.
 The primary chain is intentionally limited to stages with a measured
 steady-state throughput increase over the previous stage.
 
+## Online Demo
+
+GitHub Pages: [https://chaiduo.github.io/FT-GEMM/](https://chaiduo.github.io/FT-GEMM/)
+
+The online page presents the S0-S4 optimization chain, ABFT workflow, source
+excerpts, architecture diagrams, and measured performance. It is deployed
+automatically from `master` when `web/**` or the Pages workflow changes.
+
+To open the same page locally:
+
+```bash
+xdg-open web/index.html
+```
+
 ## Optimization Chain
 
 | Stage | Source | Main optimization | 4096^3 TFLOPS |
