@@ -118,10 +118,10 @@ The CUTE/WGMMA stages require the configured CUTLASS header path in
 
 ## Run
 
-Use physical GPU 1:
+Use the last physical GPU (GPU 7 on the eight-GPU test host):
 
 ```bash
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=7
 ```
 
 Run the complete primary chain manually:
@@ -211,10 +211,116 @@ Build the cuBLASLt FP8 reference:
 
 ```bash
 make cublaslt_fp8
-CUDA_VISIBLE_DEVICES=1 ./build/cublaslt_fp8_gemm_benchmark \
+CUDA_VISIBLE_DEVICES=7 ./build/cublaslt_fp8_gemm_benchmark \
   --m 4096 --n 4096 --k 4096 --warmup 3 --repeat 10
 ```
 
 `src/gemm_softmax_abft.cu` is a separate correctness prototype for a
 GEMM-plus-Softmax invariant and is not part of the five-stage performance
 chain.
+
+## FT-FlashAttention A0-A14
+
+The FT-FlashAttention chain starts from the correctness-first A0 kernel and
+keeps every optimization stage as an independent source file. It does not
+materialize the full score or probability matrix. A0-A7 assign one query row
+to each CTA; A8-A14 process multiple query rows with Hopper WGMMA:
+
+```text
+QK score projection ABFT
+    -> candidate online Softmax
+    -> independent exp/moment verification
+    -> PV accumulation and output projection ABFT
+```
+
+The input layout is `[B,H,N,D]`. Q/K/V use FP8 E4M3 and the output uses FP32.
+Head dimensions 64 and 128 are supported. A8 replaces the CUDA Core QK/PV
+loops with FP8 WGMMA while preserving QK projection ABFT, an independent
+Softmax verifier, and PV output projection ABFT.
+
+### Optimization Chain
+
+Measurements use physical GPU 7 (NVIDIA H20), `B=1`, `H=16`, `N=512`,
+`D=64`, non-causal, 10 warmups, and 100 timed iterations.
+
+| Stage | Main optimization | Time (ms) | TFLOPS | Speedup vs previous |
+|---|---|---:|---:|---:|
+| A0 | Scalar fused online FT-Attention | 3.193 | 0.336 | baseline |
+| A1 | Warp-shuffle reductions | 2.840 | 0.378 | 1.12x |
+| A2 | Fused vector reductions | 2.652 | 0.405 | 1.07x |
+| A3 | Cached K/V checksum metadata | 1.620 | 0.663 | 1.64x |
+| A4 | Fast exponential and fast math | 1.617 | 0.664 | 1.00x |
+| A5 | Cooperative QK dot products | 0.958 | 1.121 | 1.69x |
+| A6 | Cooperative QK and PV dot products | 0.866 | 1.240 | 1.11x |
+| A7 | Increase the online K/V tile from 64 to 128 | 0.642 | 1.673 | 1.35x |
+| A8 | 64-query CTA, FP8 WGMMA for QK and PV | 0.134 | 8.038 | 4.80x |
+| A10 | Two WGMMA groups share each K/V tile | 0.125 | 8.612 | 1.07x |
+| A11 | Recompute verifier moments only during recovery | 0.119 | 9.045 | 1.05x |
+| A12 | D64 split-key dual-warpgroup specialization | 0.118 | 9.122 | 1.01x |
+| A13 | Register-resident Softmax/PV | 0.113 | 9.476 | 1.04x |
+| A14 | TMA double buffer + warp specialization | 0.096 | 11.239 | 1.19x |
+
+A9 introduces shared-memory lifetime aliasing. It mainly benefits D128,
+reducing shared storage from 153.6 KB to 112.1 KB and raising throughput from
+6.275 to 10.911 TFLOPS; its D64 result is statistically unchanged from A8.
+
+A13 keeps the Score, quantized probability, and output accumulators in
+register fragments across QK, online Softmax, and PV. A14 adds a dedicated TMA
+producer warpgroup and a two-stage K/V ring buffer; the consumer warpgroup
+executes WGMMA and ABFT while the producer prefetches the next tile.
+
+For D128, A11 remains the preferred topology at `0.158682 ms / 13.533 TFLOPS`;
+A14 reaches `12.712 TFLOPS` because its forced two-CTA occupancy causes more
+register spill at D128. For D64, A14 is 6.72x faster than A7. Its metadata
+preparation takes about `0.052 ms`, including the padded V-transpose required
+to make the TMA source K-major.
+
+For context, the same H20 runs PyTorch 2.11 Flash SDPA in FP16 at `0.027902 ms
+/ 38.48 TFLOPS` for D64 and `0.036828 ms / 58.31 TFLOPS` for D128. The best
+fault-protected paths currently reach about 29.2% and 23.2% of that throughput.
+This is not an equal-dtype comparison: the custom kernels use FP8 inputs plus
+three-stage fault protection, while the PyTorch reference uses FP16 without
+ABFT.
+
+A8-A14 scale each online probability by 256 before E4M3 conversion so that PV
+can use WGMMA without underflowing typical `1/N` probabilities. This changes
+the D64 maximum absolute error from about `1e-8` in A7 to `1.58e-3` in A14,
+which remains below the configured verification tolerance.
+
+### Build And Run
+
+```bash
+make ft_flash_attention_a11 ft_flash_attention_a14
+
+CUDA_VISIBLE_DEVICES=7 ./build/ft_flash_attention_a14 \
+  --batch 1 --heads 16 --sequence 512 --head-dim 64 \
+  --warmup 10 --repeat 100
+
+CUDA_VISIBLE_DEVICES=7 ./build/ft_flash_attention_a11 \
+  --batch 1 --heads 16 --sequence 512 --head-dim 128 \
+  --warmup 10 --repeat 100
+```
+
+Fault injection is available at four boundaries:
+
+```bash
+# QK score corruption: projection checks locate and correct the key.
+CUDA_VISIBLE_DEVICES=7 ./build/ft_flash_attention_a14 \
+  --fault-stage score --fault-query 64 --fault-index 37 --fault-value 1
+
+# Softmax exp corruption: 0th/1st/2nd moments locate and correct it.
+CUDA_VISIBLE_DEVICES=7 ./build/ft_flash_attention_a14 \
+  --fault-stage softmax --fault-query 64 --fault-index 37 --fault-value 0.5
+
+# Online denominator corruption: independent state triggers tile replay.
+CUDA_VISIBLE_DEVICES=7 ./build/ft_flash_attention_a14 \
+  --fault-stage softmax-state --fault-query 64 --fault-index 37 --fault-value 0.5
+
+# Final PV output corruption: output projections locate and correct the dimension.
+CUDA_VISIBLE_DEVICES=7 ./build/ft_flash_attention_a14 \
+  --fault-stage output --fault-query 64 --fault-index 23 --fault-value 1
+```
+
+The Softmax verifier intentionally recomputes exponential moments from the
+corrected score tile. Reusing the same exp values for both computation and
+verification would allow common-mode faults to escape.
